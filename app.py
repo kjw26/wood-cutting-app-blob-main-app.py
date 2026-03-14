@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="목재 재단 프로그램 Fast v3", layout="wide")
+st.set_page_config(page_title="목재 재단 프로그램 Fast v4", layout="wide")
 
 BOARD_PRESETS = {
     "기본 4x8 (1220 x 2440)": (2440.0, 1220.0),
@@ -114,6 +114,15 @@ def load_bom_from_dataframe(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], Lis
         items.append(item)
 
     return items, errors
+
+
+def apply_cut_count(parts: List[Dict[str, Any]], cut_count: int) -> List[Dict[str, Any]]:
+    adjusted: List[Dict[str, Any]] = []
+    for p in parts:
+        row = dict(p)
+        row["qty"] = max(1, to_int(row.get("qty"), 1)) * cut_count
+        adjusted.append(row)
+    return adjusted
 
 
 def expand_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -416,8 +425,8 @@ def make_svg(sheet: Dict[str, Any], board_width_mm: float, board_height_mm: floa
     """
 
 
-st.title("목재 재단 프로그램 Fast v3")
-st.caption("품목 다중 선택 + 같은 색상/두께 혼합 재단 + 분석 제안 포함")
+st.title("목재 재단 프로그램 Fast v4")
+st.caption("품목 다중 선택 + 원장 매수/재단 매수 포함 + 분석 제안 포함")
 
 uploaded_file = st.file_uploader("BOM 엑셀 업로드", type=["xlsx", "xls"])
 
@@ -502,9 +511,11 @@ if bom_items:
             with r1:
                 board_width = st.number_input("원장 가로(mm)", min_value=100.0, value=float(preset_w), step=1.0, format="%.1f")
                 kerf = st.number_input("톱날폭(mm)", min_value=0.0, value=4.8, step=0.1, format="%.1f")
+                board_batch = st.number_input("한 번에 재단할 원장 매수", min_value=1, value=1, step=1)
             with r2:
                 board_height = st.number_input("원장 세로(mm)", min_value=100.0, value=float(preset_h), step=1.0, format="%.1f")
                 margin = st.number_input("여유치(mm)", min_value=0.0, value=10.0, step=0.1, format="%.1f")
+                cut_count = st.number_input("재단 매수", min_value=1, value=1, step=1)
 
             rotate_allowed = st.checkbox("회전 허용", value=True)
 
@@ -516,17 +527,18 @@ if bom_items:
                         if bool(x.get("selected")) and x.get("width_mm") and x.get("height_mm") and x.get("thickness_mm")
                     ]
 
-                    total_qty = 0
                     for item in optimized_items:
                         item["qty"] = max(1, to_int(item.get("qty"), 1))
                         item["width_mm"] = to_float(item.get("width_mm"), 0.0)
                         item["height_mm"] = to_float(item.get("height_mm"), 0.0)
                         item["thickness_mm"] = to_float(item.get("thickness_mm"), 0.0)
-                        total_qty += item["qty"]
+
+                    optimized_items = apply_cut_count(optimized_items, int(cut_count))
+                    total_qty = sum(item["qty"] for item in optimized_items)
 
                     if not optimized_items:
                         st.error("선택된 재단 품목이 없습니다.")
-                    elif total_qty > 1500:
+                    elif total_qty > 3000:
                         st.error("총 재단 수량이 너무 많습니다. 수량을 줄여주세요.")
                     else:
                         result = optimize_parts(
@@ -539,6 +551,9 @@ if bom_items:
                             mix_same_color_thickness,
                         )
                         result["kerf_mm"] = float(kerf)
+                        result["board_batch"] = int(board_batch)
+                        result["cut_count"] = int(cut_count)
+                        result["runs_required"] = math.ceil(result["used_boards"] / max(1, int(board_batch)))
                         st.session_state["opt_result"] = result
 
                         analysis_df, analysis_summary = analyze_alternatives(
@@ -565,6 +580,11 @@ if bom_items:
                 m2.metric("수율", f"{opt_result['yield_rate']}%")
                 m3.metric("자투리 면적", f"{opt_result['waste_area']:,}")
                 m4.metric("미배치 수", opt_result["unplaced_count"])
+
+                x1, x2, x3 = st.columns(3)
+                x1.metric("한 번에 재단할 원장 매수", opt_result.get("board_batch", 1))
+                x2.metric("재단 매수", opt_result.get("cut_count", 1))
+                x3.metric("예상 재단 횟수", opt_result.get("runs_required", 1))
 
                 if opt_result["sheets"]:
                     labels = [f"Sheet {s['sheet_no']} | {s.get('group_name', '')}" for s in opt_result["sheets"]]
