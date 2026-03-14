@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="목재 재단 프로그램 Fast v4", layout="wide")
+st.set_page_config(page_title="목제 재단 최적화", layout="wide")
 
 BOARD_PRESETS = {
     "기본 4x8 (1220 x 2440)": (2440.0, 1220.0),
@@ -83,7 +83,7 @@ def load_bom_from_dataframe(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], Lis
         product_code = str(raw.get("품목코드") or "").strip()
         part_code = str(raw.get("부품코드") or "").strip()
         part_name = str(raw.get("품목명") or "").strip()
-        qty = to_int(raw.get("정소요량"), 0) or to_int(raw.get("실소요량"), 0)
+        bom_qty = to_int(raw.get("정소요량"), 0) or to_int(raw.get("실소요량"), 0)
         color = str(raw.get("색상") or "").strip()
         material_name = str(raw.get("재질") or "").strip()
 
@@ -94,7 +94,9 @@ def load_bom_from_dataframe(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], Lis
             "part_code": part_code,
             "part_name": part_name,
             "color": color,
-            "qty": max(1, qty),
+            "bom_qty": max(1, bom_qty),
+            "actual_cut_qty": 1,
+            "qty": max(1, bom_qty),
             "spec_raw": str(raw.get("규격") or "").strip(),
             "width_mm": width,
             "height_mm": height,
@@ -425,8 +427,8 @@ def make_svg(sheet: Dict[str, Any], board_width_mm: float, board_height_mm: floa
     """
 
 
-st.title("목재 재단 프로그램 Fast v4")
-st.caption("품목 다중 선택 + 원장 매수/재단 매수 포함 + 분석 제안 포함")
+st.title("목재 재단 프로그램 Fast v6")
+st.caption("총 재단 수량 강조 + 상단 합계 표시")
 
 uploaded_file = st.file_uploader("BOM 엑셀 업로드", type=["xlsx", "xls"])
 
@@ -467,36 +469,65 @@ if bom_items:
             and x.get("width_mm") and x.get("height_mm") and x.get("thickness_mm")
         ]
 
-        left, right = st.columns([1.2, 1.25])
+        left, right = st.columns([1.25, 1.2])
 
         with left:
             st.subheader("BOM 목록")
             mix_same_color_thickness = st.checkbox("같은 색상 + 같은 두께 혼합 재단", value=False)
             st.caption("selected 체크된 품목만 재단합니다.")
+            st.caption("총 재단 수량 = BOM 재단 수량 × 실제 재단 수량")
 
             editable_rows = []
             for item in target_items:
                 row = dict(item)
                 row["selected"] = True
-                row["qty"] = max(1, to_int(row.get("qty"), 1))
+                row["bom_qty"] = max(1, to_int(row.get("bom_qty"), 1))
+                row["actual_cut_qty"] = max(1, to_int(row.get("actual_cut_qty"), 1))
+                row["qty"] = row["bom_qty"] * row["actual_cut_qty"]
                 editable_rows.append(row)
 
+            temp_df = pd.DataFrame(editable_rows)
+            sum_selected = int(temp_df.loc[temp_df["selected"] == True, "qty"].sum()) if not temp_df.empty else 0
+            sum_rows = int((temp_df["selected"] == True).sum()) if not temp_df.empty else 0
+
+            s1, s2 = st.columns(2)
+            s1.metric("선택 품목 수", sum_rows)
+            s2.metric("총 재단 수량 합계", sum_selected)
+
             edited_df = st.data_editor(
-                pd.DataFrame(editable_rows),
+                temp_df,
                 use_container_width=True,
-                height=500,
+                height=520,
                 disabled=[
                     "row_no", "product_code", "part_code", "part_name", "color", "spec_raw",
-                    "width_mm", "height_mm", "thickness_mm", "material_name", "process_name", "is_cutting_target"
+                    "width_mm", "height_mm", "thickness_mm", "material_name", "process_name",
+                    "is_cutting_target", "qty"
                 ],
                 column_config={
                     "selected": st.column_config.CheckboxColumn("선택", default=True),
-                    "qty": st.column_config.NumberColumn("재단 수량", min_value=1, step=1, format="%d"),
+                    "bom_qty": st.column_config.NumberColumn("BOM 재단 수량", min_value=1, step=1, format="%d"),
+                    "actual_cut_qty": st.column_config.NumberColumn("실제 재단 수량", min_value=1, step=1, format="%d"),
+                    "qty": st.column_config.NumberColumn("총 재단 수량", format="%d"),
                     "width_mm": st.column_config.NumberColumn("가로(mm)", format="%.1f"),
                     "height_mm": st.column_config.NumberColumn("세로(mm)", format="%.1f"),
                     "thickness_mm": st.column_config.NumberColumn("두께(mm)", format="%.1f"),
                 },
             )
+
+            if not edited_df.empty:
+                edited_df["bom_qty"] = edited_df["bom_qty"].fillna(1).astype(int).clip(lower=1)
+                edited_df["actual_cut_qty"] = edited_df["actual_cut_qty"].fillna(1).astype(int).clip(lower=1)
+                edited_df["qty"] = edited_df["bom_qty"] * edited_df["actual_cut_qty"]
+
+                sum_selected_after = int(edited_df.loc[edited_df["selected"] == True, "qty"].sum())
+                st.markdown(
+                    f"""
+                    <div style="margin-top:8px;padding:10px 14px;border-radius:10px;background:#fff3cd;border:1px solid #ffe69c;color:#7a4b00;font-weight:700;">
+                    선택된 총 재단 수량 합계: {sum_selected_after:,}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
         with right:
             st.subheader("최적화 조건")
@@ -527,11 +558,15 @@ if bom_items:
                         if bool(x.get("selected")) and x.get("width_mm") and x.get("height_mm") and x.get("thickness_mm")
                     ]
 
+                    total_qty = 0
                     for item in optimized_items:
-                        item["qty"] = max(1, to_int(item.get("qty"), 1))
+                        item["bom_qty"] = max(1, to_int(item.get("bom_qty"), 1))
+                        item["actual_cut_qty"] = max(1, to_int(item.get("actual_cut_qty"), 1))
+                        item["qty"] = item["bom_qty"] * item["actual_cut_qty"]
                         item["width_mm"] = to_float(item.get("width_mm"), 0.0)
                         item["height_mm"] = to_float(item.get("height_mm"), 0.0)
                         item["thickness_mm"] = to_float(item.get("thickness_mm"), 0.0)
+                        total_qty += item["qty"]
 
                     optimized_items = apply_cut_count(optimized_items, int(cut_count))
                     total_qty = sum(item["qty"] for item in optimized_items)
@@ -554,6 +589,7 @@ if bom_items:
                         result["board_batch"] = int(board_batch)
                         result["cut_count"] = int(cut_count)
                         result["runs_required"] = math.ceil(result["used_boards"] / max(1, int(board_batch)))
+                        result["total_selected_qty"] = total_qty
                         st.session_state["opt_result"] = result
 
                         analysis_df, analysis_summary = analyze_alternatives(
@@ -581,10 +617,11 @@ if bom_items:
                 m3.metric("자투리 면적", f"{opt_result['waste_area']:,}")
                 m4.metric("미배치 수", opt_result["unplaced_count"])
 
-                x1, x2, x3 = st.columns(3)
-                x1.metric("한 번에 재단할 원장 매수", opt_result.get("board_batch", 1))
-                x2.metric("재단 매수", opt_result.get("cut_count", 1))
-                x3.metric("예상 재단 횟수", opt_result.get("runs_required", 1))
+                z1, z2, z3, z4 = st.columns(4)
+                z1.metric("총 재단 수량 합계", opt_result.get("total_selected_qty", 0))
+                z2.metric("한 번에 재단할 원장 매수", opt_result.get("board_batch", 1))
+                z3.metric("재단 매수", opt_result.get("cut_count", 1))
+                z4.metric("예상 재단 횟수", opt_result.get("runs_required", 1))
 
                 if opt_result["sheets"]:
                     labels = [f"Sheet {s['sheet_no']} | {s.get('group_name', '')}" for s in opt_result["sheets"]]
@@ -613,7 +650,6 @@ if bom_items:
                     if analysis_summary:
                         st.info(analysis_summary)
                     st.dataframe(analysis_df, use_container_width=True)
-                    st.caption("예: 여유치를 변경하거나, 원장을 4x6(1220 x 1830)로 바꿨을 때의 수율 비교")
     else:
         st.info("제품코드를 입력하거나 선택하세요.")
 else:
