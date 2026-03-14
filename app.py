@@ -284,7 +284,7 @@ st.title("목재 재단 프로그램")
 st.caption("분할도 계산 보정 버전: 재단 수량 직접 수정, 톱날폭/여유치 소수점, 톱날선 표시")
 
 with st.expander("지원 BOM 컬럼", expanded=False):
-    st.markdown(\"\"\"
+    st.markdown("""
     - 품목코드
     - 부품코드
     - 품목명
@@ -295,7 +295,7 @@ with st.expander("지원 BOM 컬럼", expanded=False):
     - 재질
     - 소요공정
     - 대표이미지
-    \"\"\")
+    """)
 
 uploaded_file = st.file_uploader("BOM 엑셀 업로드", type=["xlsx", "xls"])
 
@@ -317,7 +317,7 @@ if bom_items:
     with col1:
         st.metric("업로드 행 수", len(bom_items))
     with col2:
-        st.metric("제품 수", len(sorted({x['product_code'] for x in bom_items if x['product_code']})))
+        st.metric("제품 수", len(sorted({x["product_code"] for x in bom_items if x["product_code"]})))
     with col3:
         st.metric("재단 대상 행 수", sum(1 for x in bom_items if x["is_cutting_target"]))
 
