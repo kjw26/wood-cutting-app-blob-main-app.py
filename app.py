@@ -7,7 +7,6 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-
 st.set_page_config(page_title="Wood Cutting Optimizer", layout="wide")
 
 
@@ -131,9 +130,7 @@ def try_place_in_free_rect(part: Dict[str, Any], free_rect: Dict[str, float], ke
         variants.append((part["height_mm"], part["width_mm"], True))
 
     for w, h, rotated in variants:
-        need_w = w + kerf
-        need_h = h + kerf
-        if need_w <= free_rect["w"] and need_h <= free_rect["h"]:
+        if w <= free_rect["w"] and h <= free_rect["h"]:
             placement = {
                 "x_mm": round(free_rect["x"], 1),
                 "y_mm": round(free_rect["y"], 1),
@@ -143,19 +140,30 @@ def try_place_in_free_rect(part: Dict[str, Any], free_rect: Dict[str, float], ke
                 "part_code": part["part_code"],
                 "part_name": part["part_name"],
             }
+
+            right_w = free_rect["w"] - w - kerf
+            bottom_h = free_rect["h"] - h - kerf
+
             right = {
-                "x": free_rect["x"] + need_w,
+                "x": free_rect["x"] + w + kerf,
                 "y": free_rect["y"],
-                "w": free_rect["w"] - need_w,
+                "w": right_w,
                 "h": h,
             }
             bottom = {
                 "x": free_rect["x"],
-                "y": free_rect["y"] + need_h,
+                "y": free_rect["y"] + h + kerf,
                 "w": free_rect["w"],
-                "h": free_rect["h"] - need_h,
+                "h": bottom_h,
             }
-            new_rects = [r for r in (right, bottom) if r["w"] > 20 and r["h"] > 20]
+            bottom_right = {
+                "x": free_rect["x"] + w + kerf,
+                "y": free_rect["y"] + h + kerf,
+                "w": right_w,
+                "h": bottom_h,
+            }
+
+            new_rects = [r for r in (right, bottom, bottom_right) if r["w"] > 10 and r["h"] > 10]
             return placement, new_rects
     return None, None
 
@@ -232,12 +240,14 @@ def optimize_parts(parts: List[Dict[str, Any]], board_width: float, board_height
     }
 
 
-def make_svg(sheet: Dict[str, Any], board_width_mm: float, board_height_mm: float) -> str:
+def make_svg(sheet: Dict[str, Any], board_width_mm: float, board_height_mm: float, kerf: float = 0.0) -> str:
     scale = min(900 / board_width_mm, 600 / board_height_mm)
     svg_width = int(board_width_mm * scale)
     svg_height = int(board_height_mm * scale)
 
     parts_svg = []
+    cut_lines = []
+
     for p in sheet["placements"]:
         x = p["x_mm"] * scale
         y = p["y_mm"] * scale
@@ -245,31 +255,36 @@ def make_svg(sheet: Dict[str, Any], board_width_mm: float, board_height_mm: floa
         h = p["height_mm"] * scale
         label = f'{p["part_code"]} ({p["width_mm"]}x{p["height_mm"]})'
         parts_svg.append(
-            f'''
+            f"""
             <g>
                 <rect x="{x}" y="{y}" width="{w}" height="{h}"
                       fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.2"></rect>
                 <text x="{x + 4}" y="{y + 16}" font-size="12" fill="#111">{label}</text>
             </g>
-            '''
+            """
         )
+        if kerf > 0:
+            k = kerf * scale
+            cut_lines.append(f'<rect x="{x + w}" y="{y}" width="{k}" height="{h}" fill="#fca5a5" fill-opacity="0.65"></rect>')
+            cut_lines.append(f'<rect x="{x}" y="{y + h}" width="{w}" height="{k}" fill="#fca5a5" fill-opacity="0.65"></rect>')
 
-    return f'''
+    return f"""
     <div style="overflow:auto; border:1px solid #ddd; padding:12px; background:#fff;">
       <svg width="{svg_width}" height="{svg_height}" xmlns="http://www.w3.org/2000/svg">
           <rect x="0" y="0" width="{svg_width}" height="{svg_height}"
                 fill="white" stroke="#333" stroke-width="2"></rect>
-          {"".join(parts_svg)}
+          {''.join(cut_lines)}
+          {''.join(parts_svg)}
       </svg>
     </div>
-    '''
+    """
 
 
 st.title("목재 재단 프로그램")
-st.caption("재단 수량 직접 수정 가능, 톱날폭/여유치 소수점 입력 가능 버전")
+st.caption("분할도 계산 보정 버전: 재단 수량 직접 수정, 톱날폭/여유치 소수점, 톱날선 표시")
 
 with st.expander("지원 BOM 컬럼", expanded=False):
-    st.markdown("""
+    st.markdown(\"\"\"
     - 품목코드
     - 부품코드
     - 품목명
@@ -280,7 +295,7 @@ with st.expander("지원 BOM 컬럼", expanded=False):
     - 재질
     - 소요공정
     - 대표이미지
-    """)
+    \"\"\")
 
 uploaded_file = st.file_uploader("BOM 엑셀 업로드", type=["xlsx", "xls"])
 
@@ -302,7 +317,7 @@ if bom_items:
     with col1:
         st.metric("업로드 행 수", len(bom_items))
     with col2:
-        st.metric("제품 수", len(sorted({x["product_code"] for x in bom_items if x["product_code"]})))
+        st.metric("제품 수", len(sorted({x['product_code'] for x in bom_items if x['product_code']})))
     with col3:
         st.metric("재단 대상 행 수", sum(1 for x in bom_items if x["is_cutting_target"]))
 
@@ -346,13 +361,7 @@ if bom_items:
                     "is_cutting_target"
                 ],
                 column_config={
-                    "qty": st.column_config.NumberColumn(
-                        "재단 수량",
-                        min_value=1,
-                        step=1,
-                        format="%d",
-                        help="최적화에 사용할 수량을 직접 입력하세요."
-                    ),
+                    "qty": st.column_config.NumberColumn("재단 수량", min_value=1, step=1, format="%d"),
                     "width_mm": st.column_config.NumberColumn("가로(mm)", format="%.1f"),
                     "height_mm": st.column_config.NumberColumn("세로(mm)", format="%.1f"),
                     "thickness_mm": st.column_config.NumberColumn("두께(mm)", format="%.1f"),
@@ -374,10 +383,7 @@ if bom_items:
             if st.button("최적화 실행", type="primary", use_container_width=True):
                 try:
                     optimized_items = edited_df.to_dict("records")
-                    optimized_items = [
-                        x for x in optimized_items
-                        if bool(x.get("is_cutting_target")) and x.get("width_mm") and x.get("height_mm")
-                    ]
+                    optimized_items = [x for x in optimized_items if bool(x.get("is_cutting_target")) and x.get("width_mm") and x.get("height_mm")]
 
                     for item in optimized_items:
                         item["qty"] = max(1, to_int(item.get("qty"), 1))
@@ -396,6 +402,7 @@ if bom_items:
                             float(margin),
                             rotate_allowed,
                         )
+                        result["kerf_mm"] = float(kerf)
                         st.session_state["opt_result"] = result
                         st.session_state["opt_product"] = selected_product
                 except Exception as exc:
@@ -411,20 +418,26 @@ if bom_items:
                 with r1:
                     st.metric("사용 원판 수", opt_result["used_boards"])
                 with r2:
-                    st.metric("수율", f'{opt_result["yield_rate"]}%')
+                    st.metric("수율", f"{opt_result['yield_rate']}%")
                 with r3:
-                    st.metric("자투리 면적", f'{opt_result["waste_area"]:,}')
+                    st.metric("자투리 면적", f"{opt_result['waste_area']:,}")
                 with r4:
                     st.metric("미배치 수", opt_result["unplaced_count"])
 
                 if opt_result["sheets"]:
-                    labels = [f'Sheet {s["sheet_no"]}' for s in opt_result["sheets"]]
+                    labels = [f"Sheet {s['sheet_no']}" for s in opt_result["sheets"]]
                     selected_sheet_label = st.selectbox("시트 선택", labels)
                     selected_sheet_no = int(selected_sheet_label.replace("Sheet ", ""))
                     selected_sheet = next(s for s in opt_result["sheets"] if s["sheet_no"] == selected_sheet_no)
 
+                    st.caption("빨간색은 톱날폭(kerf) 영역입니다.")
                     components.html(
-                        make_svg(selected_sheet, opt_result["board_width_mm"], opt_result["board_height_mm"]),
+                        make_svg(
+                            selected_sheet,
+                            opt_result["board_width_mm"],
+                            opt_result["board_height_mm"],
+                            opt_result.get("kerf_mm", 0.0),
+                        ),
                         height=700,
                         scrolling=True,
                     )
