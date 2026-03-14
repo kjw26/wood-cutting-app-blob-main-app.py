@@ -1,5 +1,6 @@
 import math
 import re
+import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -10,14 +11,14 @@ import streamlit.components.v1 as components
 st.set_page_config(page_title="Wood Cutting Optimizer", layout="wide")
 
 
-def parse_spec(spec_raw: Any) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+def parse_spec(spec_raw: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     if spec_raw is None or (isinstance(spec_raw, float) and math.isnan(spec_raw)):
         return None, None, None
     text = str(spec_raw).strip()
-    match = re.match(r"^\s*(\d+)\s*[*xX]\s*(\d+)\s*[*xX]\s*(\d+)\s*$", text)
+    match = re.match(r"^\s*(\d+(?:\.\d+)?)\s*[*xX]\s*(\d+(?:\.\d+)?)\s*[*xX]\s*(\d+(?:\.\d+)?)\s*$", text)
     if not match:
         return None, None, None
-    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+    return float(match.group(1)), float(match.group(2)), float(match.group(3))
 
 
 def normalize_value(value: Any) -> Any:
@@ -38,7 +39,17 @@ def to_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def is_cutting_target(row: Dict[str, Any], width: Optional[int], height: Optional[int], thickness: Optional[int]) -> bool:
+def to_float(value: Any, default: float = 0.0) -> float:
+    value = normalize_value(value)
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def is_cutting_target(row: Dict[str, Any], width: Optional[float], height: Optional[float], thickness: Optional[float]) -> bool:
     material = str(normalize_value(row.get("재질")) or "").strip()
     image_flag = str(normalize_value(row.get("대표이미지")) or "").strip().upper()
     qty = to_int(row.get("정소요량"), 0) or to_int(row.get("실소요량"), 0)
@@ -55,6 +66,7 @@ def is_cutting_target(row: Dict[str, Any], width: Optional[int], height: Optiona
 
 
 def load_bom_from_dataframe(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    df.columns = [str(c).strip() for c in df.columns]
     df = df.fillna("")
     items: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
@@ -73,7 +85,7 @@ def load_bom_from_dataframe(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], Lis
             "part_code": part_code,
             "part_name": part_name,
             "color": str(raw.get("색상") or "").strip(),
-            "qty": qty,
+            "qty": max(1, qty),
             "spec_raw": str(raw.get("규격") or "").strip(),
             "width_mm": width,
             "height_mm": height,
@@ -98,22 +110,22 @@ def load_bom_from_dataframe(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], Lis
 def expand_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     expanded: List[Dict[str, Any]] = []
     for p in parts:
-        repeat = max(1, int(p["qty"]))
+        repeat = max(1, to_int(p.get("qty"), 1))
         for _ in range(repeat):
             expanded.append({
                 "product_code": p["product_code"],
                 "part_code": p["part_code"],
                 "part_name": p["part_name"],
-                "width_mm": p["width_mm"],
-                "height_mm": p["height_mm"],
-                "thickness_mm": p["thickness_mm"],
+                "width_mm": float(p["width_mm"]),
+                "height_mm": float(p["height_mm"]),
+                "thickness_mm": float(p["thickness_mm"]),
                 "material_name": p["material_name"],
             })
     expanded.sort(key=lambda x: x["width_mm"] * x["height_mm"], reverse=True)
     return expanded
 
 
-def try_place_in_free_rect(part: Dict[str, Any], free_rect: Dict[str, int], kerf: int, rotate_allowed: bool):
+def try_place_in_free_rect(part: Dict[str, Any], free_rect: Dict[str, float], kerf: float, rotate_allowed: bool):
     variants = [(part["width_mm"], part["height_mm"], False)]
     if rotate_allowed and part["width_mm"] != part["height_mm"]:
         variants.append((part["height_mm"], part["width_mm"], True))
@@ -123,10 +135,10 @@ def try_place_in_free_rect(part: Dict[str, Any], free_rect: Dict[str, int], kerf
         need_h = h + kerf
         if need_w <= free_rect["w"] and need_h <= free_rect["h"]:
             placement = {
-                "x_mm": free_rect["x"],
-                "y_mm": free_rect["y"],
-                "width_mm": w,
-                "height_mm": h,
+                "x_mm": round(free_rect["x"], 1),
+                "y_mm": round(free_rect["y"], 1),
+                "width_mm": round(w, 1),
+                "height_mm": round(h, 1),
                 "rotated": rotated,
                 "part_code": part["part_code"],
                 "part_name": part["part_name"],
@@ -148,7 +160,7 @@ def try_place_in_free_rect(part: Dict[str, Any], free_rect: Dict[str, int], kerf
     return None, None
 
 
-def optimize_parts(parts: List[Dict[str, Any]], board_width: int, board_height: int, kerf: int, margin: int, rotate_allowed: bool):
+def optimize_parts(parts: List[Dict[str, Any]], board_width: float, board_height: float, kerf: float, margin: float, rotate_allowed: bool):
     usable_w = board_width - margin * 2
     usable_h = board_height - margin * 2
     if usable_w <= 0 or usable_h <= 0:
@@ -176,8 +188,8 @@ def optimize_parts(parts: List[Dict[str, Any]], board_width: int, board_height: 
 
             if best_result:
                 placement, new_rects = best_result
-                placement["x_mm"] += margin
-                placement["y_mm"] += margin
+                placement["x_mm"] = round(placement["x_mm"] + margin, 1)
+                placement["y_mm"] = round(placement["y_mm"] + margin, 1)
                 sheet["placements"].append(placement)
                 sheet["free_rects"].pop(best_idx)
                 sheet["free_rects"].extend(new_rects)
@@ -188,12 +200,12 @@ def optimize_parts(parts: List[Dict[str, Any]], board_width: int, board_height: 
             new_sheet = {
                 "sheet_no": len(sheets) + 1,
                 "placements": [],
-                "free_rects": [{"x": 0, "y": 0, "w": usable_w, "h": usable_h}],
+                "free_rects": [{"x": 0.0, "y": 0.0, "w": usable_w, "h": usable_h}],
             }
             placement, new_rects = try_place_in_free_rect(part, new_sheet["free_rects"][0], kerf, rotate_allowed)
             if placement:
-                placement["x_mm"] += margin
-                placement["y_mm"] += margin
+                placement["x_mm"] = round(placement["x_mm"] + margin, 1)
+                placement["y_mm"] = round(placement["y_mm"] + margin, 1)
                 new_sheet["placements"].append(placement)
                 new_sheet["free_rects"] = new_rects
                 sheets.append(new_sheet)
@@ -208,11 +220,11 @@ def optimize_parts(parts: List[Dict[str, Any]], board_width: int, board_height: 
     yield_rate = round((total_part_area / total_board_area) * 100, 2) if total_board_area else 0
 
     return {
-        "board_width_mm": board_width,
-        "board_height_mm": board_height,
+        "board_width_mm": round(board_width, 1),
+        "board_height_mm": round(board_height, 1),
         "used_boards": used_boards,
-        "total_part_area": total_part_area,
-        "waste_area": waste_area,
+        "total_part_area": round(total_part_area, 1),
+        "waste_area": round(waste_area, 1),
         "yield_rate": yield_rate,
         "unplaced_count": len(unplaced),
         "unplaced_parts": unplaced,
@@ -220,7 +232,7 @@ def optimize_parts(parts: List[Dict[str, Any]], board_width: int, board_height: 
     }
 
 
-def make_svg(sheet: Dict[str, Any], board_width_mm: int, board_height_mm: int) -> str:
+def make_svg(sheet: Dict[str, Any], board_width_mm: float, board_height_mm: float) -> str:
     scale = min(900 / board_width_mm, 600 / board_height_mm)
     svg_width = int(board_width_mm * scale)
     svg_height = int(board_height_mm * scale)
@@ -233,28 +245,28 @@ def make_svg(sheet: Dict[str, Any], board_width_mm: int, board_height_mm: int) -
         h = p["height_mm"] * scale
         label = f'{p["part_code"]} ({p["width_mm"]}x{p["height_mm"]})'
         parts_svg.append(
-            f"""
+            f'''
             <g>
                 <rect x="{x}" y="{y}" width="{w}" height="{h}"
                       fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.2"></rect>
                 <text x="{x + 4}" y="{y + 16}" font-size="12" fill="#111">{label}</text>
             </g>
-            """
+            '''
         )
 
-    return f"""
+    return f'''
     <div style="overflow:auto; border:1px solid #ddd; padding:12px; background:#fff;">
       <svg width="{svg_width}" height="{svg_height}" xmlns="http://www.w3.org/2000/svg">
           <rect x="0" y="0" width="{svg_width}" height="{svg_height}"
                 fill="white" stroke="#333" stroke-width="2"></rect>
-          {''.join(parts_svg)}
+          {"".join(parts_svg)}
       </svg>
     </div>
-    """
+    '''
 
 
 st.title("목재 재단 프로그램")
-st.caption("Streamlit Cloud에 바로 올릴 수 있는 단일 파일 버전입니다.")
+st.caption("재단 수량 직접 수정 가능, 톱날폭/여유치 소수점 입력 가능 버전")
 
 with st.expander("지원 BOM 컬럼", expanded=False):
     st.markdown("""
@@ -306,45 +318,89 @@ if bom_items:
         selected_product = st.selectbox("제품코드 선택", products)
 
         product_items = [x for x in bom_items if x["product_code"] == selected_product]
-        cutting_items = [x for x in product_items if x["is_cutting_target"]]
+        cutting_items = [
+            x for x in product_items
+            if x["is_cutting_target"] and x.get("width_mm") and x.get("height_mm") and x.get("thickness_mm")
+        ]
 
-        left, right = st.columns([1.1, 1.4])
+        left, right = st.columns([1.2, 1.3])
 
         with left:
             st.markdown("### BOM 목록")
             show_cutting_only = st.checkbox("재단 대상만 보기", value=True)
-            view_items = cutting_items if show_cutting_only else product_items
-            st.dataframe(pd.DataFrame(view_items), use_container_width=True, height=420)
+            base_items = cutting_items if show_cutting_only else product_items
+            editable_items = []
+
+            for item in base_items:
+                row = dict(item)
+                row["qty"] = max(1, to_int(row.get("qty"), 1))
+                editable_items.append(row)
+
+            edited_df = st.data_editor(
+                pd.DataFrame(editable_items),
+                use_container_width=True,
+                height=460,
+                disabled=[
+                    "row_no", "product_code", "part_code", "part_name", "color", "spec_raw",
+                    "width_mm", "height_mm", "thickness_mm", "material_name", "process_name",
+                    "is_cutting_target"
+                ],
+                column_config={
+                    "qty": st.column_config.NumberColumn(
+                        "재단 수량",
+                        min_value=1,
+                        step=1,
+                        format="%d",
+                        help="최적화에 사용할 수량을 직접 입력하세요."
+                    ),
+                    "width_mm": st.column_config.NumberColumn("가로(mm)", format="%.1f"),
+                    "height_mm": st.column_config.NumberColumn("세로(mm)", format="%.1f"),
+                    "thickness_mm": st.column_config.NumberColumn("두께(mm)", format="%.1f"),
+                }
+            )
 
         with right:
             st.markdown("### 최적화 조건")
             c1, c2 = st.columns(2)
             with c1:
-                board_width = st.number_input("원판 가로(mm)", min_value=100, value=2440, step=10)
-                kerf = st.number_input("톱날폭(mm)", min_value=0, value=3, step=1)
+                board_width = st.number_input("원판 가로(mm)", min_value=100.0, value=2440.0, step=1.0, format="%.1f")
+                kerf = st.number_input("톱날폭(mm)", min_value=0.0, value=3.0, step=0.1, format="%.1f")
             with c2:
-                board_height = st.number_input("원판 세로(mm)", min_value=100, value=1220, step=10)
-                margin = st.number_input("여유치(mm)", min_value=0, value=5, step=1)
+                board_height = st.number_input("원판 세로(mm)", min_value=100.0, value=1220.0, step=1.0, format="%.1f")
+                margin = st.number_input("여유치(mm)", min_value=0.0, value=20.0, step=0.1, format="%.1f")
 
             rotate_allowed = st.checkbox("회전 허용", value=True)
 
             if st.button("최적화 실행", type="primary", use_container_width=True):
-                if not cutting_items:
-                    st.error("최적화 가능한 재단 대상 부품이 없습니다.")
-                else:
-                    try:
+                try:
+                    optimized_items = edited_df.to_dict("records")
+                    optimized_items = [
+                        x for x in optimized_items
+                        if bool(x.get("is_cutting_target")) and x.get("width_mm") and x.get("height_mm")
+                    ]
+
+                    for item in optimized_items:
+                        item["qty"] = max(1, to_int(item.get("qty"), 1))
+                        item["width_mm"] = to_float(item.get("width_mm"), 0.0)
+                        item["height_mm"] = to_float(item.get("height_mm"), 0.0)
+                        item["thickness_mm"] = to_float(item.get("thickness_mm"), 0.0)
+
+                    if not optimized_items:
+                        st.error("최적화 가능한 재단 대상 부품이 없습니다.")
+                    else:
                         result = optimize_parts(
-                            cutting_items,
-                            int(board_width),
-                            int(board_height),
-                            int(kerf),
-                            int(margin),
+                            optimized_items,
+                            float(board_width),
+                            float(board_height),
+                            float(kerf),
+                            float(margin),
                             rotate_allowed,
                         )
                         st.session_state["opt_result"] = result
                         st.session_state["opt_product"] = selected_product
-                    except Exception as exc:
-                        st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"최적화 중 오류: {exc}")
+                    st.code(traceback.format_exc())
 
             opt_result = st.session_state.get("opt_result")
             opt_product = st.session_state.get("opt_product")
@@ -380,4 +436,4 @@ if bom_items:
                         st.dataframe(pd.DataFrame(opt_result["unplaced_parts"]), use_container_width=True)
 
 else:
-    st.info("왼쪽 위에서 BOM 엑셀 파일을 업로드하면 제품 조회와 최적화를 사용할 수 있습니다.")
+    st.info("BOM 엑셀 파일을 업로드하면 제품 조회와 최적화를 사용할 수 있습니다.")
