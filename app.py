@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Wood Cutting Optimizer", layout="wide")
+st.set_page_config(page_title="Wood Cutting Optimizer Fast", layout="wide")
 
 
 def parse_spec(spec_raw: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
@@ -78,19 +78,21 @@ def load_bom_from_dataframe(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], Lis
         part_code = str(raw.get("부품코드") or "").strip()
         part_name = str(raw.get("품목명") or "").strip()
         qty = to_int(raw.get("정소요량"), 0) or to_int(raw.get("실소요량"), 0)
+        color = str(raw.get("색상") or "").strip()
+        material_name = str(raw.get("재질") or "").strip()
 
         item = {
             "row_no": int(idx) + 2,
             "product_code": product_code,
             "part_code": part_code,
             "part_name": part_name,
-            "color": str(raw.get("색상") or "").strip(),
+            "color": color,
             "qty": max(1, qty),
             "spec_raw": str(raw.get("규격") or "").strip(),
             "width_mm": width,
             "height_mm": height,
             "thickness_mm": thickness,
-            "material_name": str(raw.get("재질") or "").strip(),
+            "material_name": material_name,
             "process_name": str(raw.get("소요공정") or "").strip(),
             "is_cutting_target": is_cutting_target(raw, width, height, thickness),
         }
@@ -116,6 +118,7 @@ def expand_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "product_code": p["product_code"],
                 "part_code": p["part_code"],
                 "part_name": p["part_name"],
+                "color": p["color"],
                 "width_mm": float(p["width_mm"]),
                 "height_mm": float(p["height_mm"]),
                 "thickness_mm": float(p["thickness_mm"]),
@@ -125,73 +128,95 @@ def expand_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return expanded
 
 
-def overlaps(candidate: Dict[str, Any], placements: List[Dict[str, Any]], kerf: float) -> bool:
-    cx1 = candidate["x_mm"]
-    cy1 = candidate["y_mm"]
-    cx2 = cx1 + candidate["width_mm"]
-    cy2 = cy1 + candidate["height_mm"]
-
-    for p in placements:
-        px1 = p["x_mm"]
-        py1 = p["y_mm"]
-        px2 = px1 + p["width_mm"]
-        py2 = py1 + p["height_mm"]
-
-        separated = (
-            cx2 + kerf <= px1 or
-            px2 + kerf <= cx1 or
-            cy2 + kerf <= py1 or
-            py2 + kerf <= cy1
-        )
-        if not separated:
-            return True
-    return False
+def rect_contains(a: Dict[str, float], b: Dict[str, float]) -> bool:
+    return (
+        b["x"] >= a["x"] - 1e-9 and
+        b["y"] >= a["y"] - 1e-9 and
+        b["x"] + b["w"] <= a["x"] + a["w"] + 1e-9 and
+        b["y"] + b["h"] <= a["y"] + a["h"] + 1e-9
+    )
 
 
-def try_place_on_sheet(
-    placements: List[Dict[str, Any]],
-    part: Dict[str, Any],
-    board_width: float,
-    board_height: float,
-    kerf: float,
-    margin: float,
-    rotate_allowed: bool,
-) -> Optional[Dict[str, Any]]:
+def prune_rects(rects: List[Dict[str, float]]) -> List[Dict[str, float]]:
+    kept: List[Dict[str, float]] = []
+    for i, r in enumerate(rects):
+        if r["w"] <= 0 or r["h"] <= 0:
+            continue
+        contained = False
+        for j, other in enumerate(rects):
+            if i != j and rect_contains(other, r):
+                contained = True
+                break
+        if not contained:
+            kept.append(r)
+    return kept
+
+
+def split_free_rect(free_rect: Dict[str, float], used: Dict[str, float], kerf: float) -> List[Dict[str, float]]:
+    fx, fy, fw, fh = free_rect["x"], free_rect["y"], free_rect["w"], free_rect["h"]
+    ux, uy, uw, uh = used["x"], used["y"], used["w"], used["h"]
+
+    if ux >= fx + fw or ux + uw <= fx or uy >= fy + fh or uy + uh <= fy:
+        return [free_rect]
+
+    rects: List[Dict[str, float]] = []
+
+    top_h = uy - fy - kerf
+    if top_h > 0:
+        rects.append({"x": fx, "y": fy, "w": fw, "h": top_h})
+
+    bottom_y = uy + uh + kerf
+    bottom_h = fy + fh - bottom_y
+    if bottom_h > 0:
+        rects.append({"x": fx, "y": bottom_y, "w": fw, "h": bottom_h})
+
+    left_w = ux - fx - kerf
+    if left_w > 0:
+        rects.append({"x": fx, "y": fy, "w": left_w, "h": fh})
+
+    right_x = ux + uw + kerf
+    right_w = fx + fw - right_x
+    if right_w > 0:
+        rects.append({"x": right_x, "y": fy, "w": right_w, "h": fh})
+
+    return rects
+
+
+def try_place_part(free_rects: List[Dict[str, float]], part: Dict[str, Any], rotate_allowed: bool):
     variants = [(part["width_mm"], part["height_mm"], False)]
-    if rotate_allowed and part["width_mm"] != part["height_mm"]:
+    if rotate_allowed and abs(part["width_mm"] - part["height_mm"]) > 1e-9:
         variants.append((part["height_mm"], part["width_mm"], True))
 
-    start_x = margin
-    start_y = margin
-    max_x = board_width - margin
-    max_y = board_height - margin
+    best = None
+    for idx, rect in enumerate(free_rects):
+        for w, h, rotated in variants:
+            if w <= rect["w"] + 1e-9 and h <= rect["h"] + 1e-9:
+                score = rect["w"] * rect["h"] - w * h
+                if best is None or score < best["score"]:
+                    best = {
+                        "rect_index": idx,
+                        "score": score,
+                        "placement": {
+                            "x_mm": round(rect["x"], 1),
+                            "y_mm": round(rect["y"], 1),
+                            "width_mm": round(w, 1),
+                            "height_mm": round(h, 1),
+                            "rotated": rotated,
+                            "part_code": part["part_code"],
+                            "part_name": part["part_name"],
+                            "product_code": part["product_code"],
+                            "color": part["color"],
+                            "thickness_mm": round(part["thickness_mm"], 1),
+                            "material_name": part["material_name"],
+                        },
+                    }
+    return best
 
-    for w, h, rotated in variants:
-        y = start_y
-        while y + h <= max_y + 1e-9:
-            x = start_x
-            while x + w <= max_x + 1e-9:
-                candidate = {
-                    "x_mm": round(x, 1),
-                    "y_mm": round(y, 1),
-                    "width_mm": round(w, 1),
-                    "height_mm": round(h, 1),
-                    "rotated": rotated,
-                    "part_code": part["part_code"],
-                    "part_name": part["part_name"],
-                }
-                if not overlaps(candidate, placements, kerf):
-                    return candidate
-                x = round(x + 1.0, 1)
-            y = round(y + 1.0, 1)
 
-    return None
-
-
-def optimize_parts(parts: List[Dict[str, Any]], board_width: float, board_height: float, kerf: float, margin: float, rotate_allowed: bool):
-    if board_width <= 0 or board_height <= 0:
-        raise ValueError("원판 크기가 올바르지 않습니다.")
-    if margin * 2 >= board_width or margin * 2 >= board_height:
+def optimize_group(parts: List[Dict[str, Any]], board_width: float, board_height: float, kerf: float, margin: float, rotate_allowed: bool, group_name: str):
+    usable_w = board_width - margin * 2
+    usable_h = board_height - margin * 2
+    if usable_w <= 0 or usable_h <= 0:
         raise ValueError("원판 크기보다 여유치가 큽니다.")
 
     sheets: List[Dict[str, Any]] = []
@@ -201,29 +226,94 @@ def optimize_parts(parts: List[Dict[str, Any]], board_width: float, board_height
         placed = False
 
         for sheet in sheets:
-            placement = try_place_on_sheet(
-                sheet["placements"], part, board_width, board_height, kerf, margin, rotate_allowed
-            )
-            if placement is not None:
-                sheet["placements"].append(placement)
-                placed = True
-                break
+            best = try_place_part(sheet["free_rects"], part, rotate_allowed)
+            if best is None:
+                continue
+
+            placement = best["placement"]
+            placement["x_mm"] = round(placement["x_mm"] + margin, 1)
+            placement["y_mm"] = round(placement["y_mm"] + margin, 1)
+            sheet["placements"].append(placement)
+
+            used_local = {
+                "x": placement["x_mm"] - margin,
+                "y": placement["y_mm"] - margin,
+                "w": placement["width_mm"],
+                "h": placement["height_mm"],
+            }
+
+            source_rect = sheet["free_rects"].pop(best["rect_index"])
+            new_free_rects = split_free_rect(source_rect, used_local, kerf)
+            sheet["free_rects"].extend(new_free_rects)
+            sheet["free_rects"] = prune_rects(sheet["free_rects"])
+            placed = True
+            break
 
         if not placed:
-            new_sheet = {"sheet_no": len(sheets) + 1, "placements": []}
-            placement = try_place_on_sheet(
-                new_sheet["placements"], part, board_width, board_height, kerf, margin, rotate_allowed
-            )
-            if placement is not None:
-                new_sheet["placements"].append(placement)
-                sheets.append(new_sheet)
-            else:
+            new_sheet = {
+                "sheet_no": len(sheets) + 1,
+                "group_name": group_name,
+                "placements": [],
+                "free_rects": [{"x": 0.0, "y": 0.0, "w": usable_w, "h": usable_h}],
+            }
+            best = try_place_part(new_sheet["free_rects"], part, rotate_allowed)
+            if best is None:
                 unplaced.append(part)
+            else:
+                placement = best["placement"]
+                placement["x_mm"] = round(placement["x_mm"] + margin, 1)
+                placement["y_mm"] = round(placement["y_mm"] + margin, 1)
+                new_sheet["placements"].append(placement)
 
-    total_part_area = sum(p["width_mm"] * p["height_mm"] for s in sheets for p in s["placements"])
+                used_local = {
+                    "x": placement["x_mm"] - margin,
+                    "y": placement["y_mm"] - margin,
+                    "w": placement["width_mm"],
+                    "h": placement["height_mm"],
+                }
+
+                source_rect = new_sheet["free_rects"].pop(best["rect_index"])
+                new_sheet["free_rects"].extend(split_free_rect(source_rect, used_local, kerf))
+                new_sheet["free_rects"] = prune_rects(new_sheet["free_rects"])
+                sheets.append(new_sheet)
+
+    return sheets, unplaced
+
+
+def build_groups(parts: List[Dict[str, Any]], mix_same_color_thickness: bool):
+    groups: Dict[Tuple[str, float], List[Dict[str, Any]]] = {}
+    if mix_same_color_thickness:
+        for p in parts:
+            key = (p["color"], float(p["thickness_mm"]))
+            groups.setdefault(key, []).append(p)
+    else:
+        for p in parts:
+            key = (p["product_code"], p["color"], float(p["thickness_mm"]))
+            groups.setdefault(key, []).append(p)
+    return groups
+
+
+def optimize_parts(parts: List[Dict[str, Any]], board_width: float, board_height: float, kerf: float, margin: float, rotate_allowed: bool, mix_same_color_thickness: bool):
+    groups = build_groups(parts, mix_same_color_thickness)
+    all_sheets: List[Dict[str, Any]] = []
+    all_unplaced: List[Dict[str, Any]] = []
+
+    for key, group_parts in groups.items():
+        if mix_same_color_thickness:
+            group_name = f"색상:{key[0]} / 두께:{key[1]}"
+        else:
+            group_name = f"제품:{key[0]} / 색상:{key[1]} / 두께:{key[2]}"
+        sheets, unplaced = optimize_group(group_parts, board_width, board_height, kerf, margin, rotate_allowed, group_name)
+        start_no = len(all_sheets)
+        for i, s in enumerate(sheets, start=1):
+            s["sheet_no"] = start_no + i
+            all_sheets.append(s)
+        all_unplaced.extend(unplaced)
+
+    total_part_area = sum(p["width_mm"] * p["height_mm"] for s in all_sheets for p in s["placements"])
     board_area = board_width * board_height
-    used_boards = len(sheets)
-    total_board_area = used_boards * board_area if used_boards else 0
+    used_boards = len(all_sheets)
+    total_board_area = used_boards * board_area if used_boards else 0.0
     waste_area = max(0.0, total_board_area - total_part_area)
     yield_rate = round((total_part_area / total_board_area) * 100, 2) if total_board_area else 0.0
 
@@ -234,9 +324,9 @@ def optimize_parts(parts: List[Dict[str, Any]], board_width: float, board_height
         "total_part_area": round(total_part_area, 1),
         "waste_area": round(waste_area, 1),
         "yield_rate": yield_rate,
-        "unplaced_count": len(unplaced),
-        "unplaced_parts": unplaced,
-        "sheets": sheets,
+        "unplaced_count": len(all_unplaced),
+        "unplaced_parts": all_unplaced,
+        "sheets": all_sheets,
     }
 
 
@@ -266,12 +356,8 @@ def make_svg(sheet: Dict[str, Any], board_width_mm: float, board_height_mm: floa
 
         if kerf > 0:
             k = kerf * scale
-            kerf_svg.append(
-                f'<rect x="{x + w}" y="{y}" width="{k}" height="{h}" fill="#fca5a5" fill-opacity="0.55"></rect>'
-            )
-            kerf_svg.append(
-                f'<rect x="{x}" y="{y + h}" width="{w}" height="{k}" fill="#fca5a5" fill-opacity="0.55"></rect>'
-            )
+            kerf_svg.append(f'<rect x="{x + w}" y="{y}" width="{k}" height="{h}" fill="#fca5a5" fill-opacity="0.45"></rect>')
+            kerf_svg.append(f'<rect x="{x}" y="{y + h}" width="{w}" height="{k}" fill="#fca5a5" fill-opacity="0.45"></rect>')
 
     return f"""
     <div style="overflow:auto; border:1px solid #ddd; padding:12px; background:#fff;">
@@ -284,22 +370,8 @@ def make_svg(sheet: Dict[str, Any], board_width_mm: float, board_height_mm: floa
     """
 
 
-st.title("목재 재단 프로그램 v1")
-st.caption("안정 버전 기반 재단 최적화")
-
-with st.expander("지원 BOM 컬럼", expanded=False):
-    st.markdown("""
-    - 품목코드
-    - 부품코드
-    - 품목명
-    - 색상
-    - 정소요량
-    - 실소요량
-    - 규격
-    - 재질
-    - 소요공정
-    - 대표이미지
-    """)
+st.title("목재 재단 프로그램 Fast v1")
+st.caption("고속형 배치 + 제품코드 입력 조회 + 같은 색상/두께 혼합 재단")
 
 uploaded_file = st.file_uploader("BOM 엑셀 업로드", type=["xlsx", "xls"])
 
@@ -327,24 +399,26 @@ if bom_items:
             st.dataframe(pd.DataFrame(bom_errors), use_container_width=True)
 
     products = sorted({x["product_code"] for x in bom_items if x["product_code"]})
-    if products:
-        selected_product = st.selectbox("제품코드 선택", products)
+    query = st.text_input("제품코드 입력", value=st.session_state.get("product_query", ""))
+    st.session_state["product_query"] = query
 
-        product_items = [x for x in bom_items if x["product_code"] == selected_product]
-        cutting_items = [
-            x for x in product_items
-            if x["is_cutting_target"] and x.get("width_mm") and x.get("height_mm") and x.get("thickness_mm")
+    matched_products = [p for p in products if query.strip().upper() in p.upper()] if query.strip() else products[:50]
+    selected_products = st.multiselect("조회 결과 / 재단 대상 제품 선택", matched_products, default=matched_products[:1] if matched_products else [])
+
+    if selected_products:
+        target_items = [
+            x for x in bom_items
+            if x["product_code"] in selected_products and x["is_cutting_target"]
+            and x.get("width_mm") and x.get("height_mm") and x.get("thickness_mm")
         ]
 
         left, right = st.columns([1.15, 1.25])
 
         with left:
             st.subheader("BOM 목록")
-            show_cutting_only = st.checkbox("재단 대상만 보기", value=True)
-            base_items = cutting_items if show_cutting_only else product_items
-
+            mix_same_color_thickness = st.checkbox("같은 색상 + 같은 두께 혼합 재단", value=False)
             editable_rows = []
-            for item in base_items:
+            for item in target_items:
                 row = dict(item)
                 row["qty"] = max(1, to_int(row.get("qty"), 1))
                 editable_rows.append(row)
@@ -352,7 +426,7 @@ if bom_items:
             edited_df = st.data_editor(
                 pd.DataFrame(editable_rows),
                 use_container_width=True,
-                height=460,
+                height=480,
                 disabled=[
                     "row_no", "product_code", "part_code", "part_name", "color", "spec_raw",
                     "width_mm", "height_mm", "thickness_mm", "material_name", "process_name", "is_cutting_target"
@@ -380,33 +454,38 @@ if bom_items:
             if st.button("최적화 실행", type="primary", use_container_width=True):
                 try:
                     optimized_items = edited_df.to_dict("records")
-                    optimized_items = [x for x in optimized_items if bool(x.get("is_cutting_target")) and x.get("width_mm") and x.get("height_mm")]
+                    optimized_items = [x for x in optimized_items if x.get("width_mm") and x.get("height_mm") and x.get("thickness_mm")]
 
+                    total_qty = 0
                     for item in optimized_items:
                         item["qty"] = max(1, to_int(item.get("qty"), 1))
                         item["width_mm"] = to_float(item.get("width_mm"), 0.0)
                         item["height_mm"] = to_float(item.get("height_mm"), 0.0)
                         item["thickness_mm"] = to_float(item.get("thickness_mm"), 0.0)
+                        total_qty += item["qty"]
 
-                    result = optimize_parts(
-                        optimized_items,
-                        float(board_width),
-                        float(board_height),
-                        float(kerf),
-                        float(margin),
-                        rotate_allowed,
-                    )
-                    result["kerf_mm"] = float(kerf)
-                    st.session_state["opt_result"] = result
-                    st.session_state["opt_product"] = selected_product
+                    if total_qty > 1500:
+                        st.error("총 재단 수량이 너무 많습니다. 수량을 줄여주세요.")
+                    else:
+                        result = optimize_parts(
+                            optimized_items,
+                            float(board_width),
+                            float(board_height),
+                            float(kerf),
+                            float(margin),
+                            rotate_allowed,
+                            mix_same_color_thickness,
+                        )
+                        result["kerf_mm"] = float(kerf)
+                        result["mix_same_color_thickness"] = mix_same_color_thickness
+                        st.session_state["opt_result"] = result
+                        st.session_state["selected_products"] = selected_products
                 except Exception as exc:
                     st.error(f"최적화 중 오류: {exc}")
                     st.code(traceback.format_exc())
 
             opt_result = st.session_state.get("opt_result")
-            opt_product = st.session_state.get("opt_product")
-
-            if opt_result and opt_product == selected_product:
+            if opt_result:
                 st.subheader("최적화 결과")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("사용 원판 수", opt_result["used_boards"])
@@ -415,12 +494,13 @@ if bom_items:
                 m4.metric("미배치 수", opt_result["unplaced_count"])
 
                 if opt_result["sheets"]:
-                    labels = [f"Sheet {s['sheet_no']}" for s in opt_result["sheets"]]
+                    labels = [f"Sheet {s['sheet_no']} | {s.get('group_name', '')}" for s in opt_result["sheets"]]
                     selected_sheet_label = st.selectbox("시트 선택", labels)
-                    selected_sheet_no = int(selected_sheet_label.replace("Sheet ", ""))
+                    selected_sheet_no = int(selected_sheet_label.split("|")[0].replace("Sheet", "").strip())
                     selected_sheet = next(s for s in opt_result["sheets"] if s["sheet_no"] == selected_sheet_no)
 
                     st.caption("빨간색은 톱날폭(kerf) 영역입니다.")
+                    st.write(f"그룹: {selected_sheet.get('group_name', '-')}")
                     components.html(
                         make_svg(
                             selected_sheet,
@@ -436,7 +516,8 @@ if bom_items:
                 if opt_result["unplaced_parts"]:
                     with st.expander("미배치 부품", expanded=False):
                         st.dataframe(pd.DataFrame(opt_result["unplaced_parts"]), use_container_width=True)
+
     else:
-        st.warning("품목코드가 있는 데이터가 없습니다.")
+        st.info("제품코드를 입력하거나 선택하세요.")
 else:
     st.info("BOM 엑셀 파일을 업로드하면 제품 조회와 최적화를 사용할 수 있습니다.")
