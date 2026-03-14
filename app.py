@@ -7,7 +7,13 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="Wood Cutting Optimizer Fast v2", layout="wide")
+st.set_page_config(page_title="목재 재단 프로그램 Fast v3", layout="wide")
+
+BOARD_PRESETS = {
+    "기본 4x8 (1220 x 2440)": (2440.0, 1220.0),
+    "4x6 (1220 x 1830)": (1830.0, 1220.0),
+    "맞춤 입력": None,
+}
 
 
 def parse_spec(spec_raw: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
@@ -163,7 +169,6 @@ def split_rect_guillotine(rect: Dict[str, float], placed_w: float, placed_h: flo
     bottom_h = rect["h"] - placed_h - kerf
     new_rects: List[Dict[str, float]] = []
 
-    # Right strip aligned to part height
     if right_w > 0:
         new_rects.append({
             "x": rect["x"] + placed_w + kerf,
@@ -172,7 +177,6 @@ def split_rect_guillotine(rect: Dict[str, float], placed_w: float, placed_h: flo
             "h": placed_h,
         })
 
-    # Bottom strip takes full remaining width of original rect
     if bottom_h > 0:
         new_rects.append({
             "x": rect["x"],
@@ -211,7 +215,7 @@ def optimize_group(parts: List[Dict[str, Any]], board_width: float, board_height
     usable_w = board_width - margin * 2
     usable_h = board_height - margin * 2
     if usable_w <= 0 or usable_h <= 0:
-        raise ValueError("원판 크기보다 여유치가 큽니다.")
+        raise ValueError("원장 크기보다 여유치가 큽니다.")
 
     sheets: List[Dict[str, Any]] = []
     unplaced: List[Dict[str, Any]] = []
@@ -329,6 +333,49 @@ def optimize_parts(parts: List[Dict[str, Any]], board_width: float, board_height
     }
 
 
+def analyze_alternatives(parts: List[Dict[str, Any]], current_board_w: float, current_board_h: float, kerf: float, margin: float, rotate_allowed: bool, mix_same_color_thickness: bool):
+    scenarios = [
+        ("현재 조건", current_board_w, current_board_h, margin),
+        ("여유치 5.0", current_board_w, current_board_h, 5.0),
+        ("여유치 8.0", current_board_w, current_board_h, 8.0),
+        ("여유치 10.0", current_board_w, current_board_h, 10.0),
+        ("원장 4x6 / 여유치 10.0", 1830.0, 1220.0, 10.0),
+    ]
+    rows = []
+    for name, bw, bh, mg in scenarios:
+        try:
+            result = optimize_parts(parts, bw, bh, kerf, mg, rotate_allowed, mix_same_color_thickness)
+            rows.append({
+                "시나리오": name,
+                "원장 가로": bw,
+                "원장 세로": bh,
+                "여유치": mg,
+                "사용 원장 수": result["used_boards"],
+                "수율(%)": result["yield_rate"],
+                "자투리 면적": result["waste_area"],
+            })
+        except Exception:
+            rows.append({
+                "시나리오": name,
+                "원장 가로": bw,
+                "원장 세로": bh,
+                "여유치": mg,
+                "사용 원장 수": None,
+                "수율(%)": None,
+                "자투리 면적": None,
+            })
+    df = pd.DataFrame(rows)
+    valid = df.dropna(subset=["수율(%)"])
+    summary = ""
+    if not valid.empty:
+        best = valid.sort_values(["수율(%)", "사용 원장 수"], ascending=[False, True]).iloc[0]
+        summary = (
+            f"분석 결과, '{best['시나리오']}' 조건이 가장 높은 수율을 보였습니다. "
+            f"예상 수율은 {best['수율(%)']}%이며, 사용 원장 수는 {int(best['사용 원장 수'])}장입니다."
+        )
+    return df, summary
+
+
 def make_svg(sheet: Dict[str, Any], board_width_mm: float, board_height_mm: float, kerf: float = 0.0) -> str:
     scale = min(900 / board_width_mm, 600 / board_height_mm)
     svg_width = int(board_width_mm * scale)
@@ -369,8 +416,8 @@ def make_svg(sheet: Dict[str, Any], board_width_mm: float, board_height_mm: floa
     """
 
 
-st.title("목재 재단 프로그램 Fast v2")
-st.caption("품목 다중 선택 + 같은 색상/두께 혼합 재단 + 분할도 보정")
+st.title("목재 재단 프로그램 Fast v3")
+st.caption("품목 다중 선택 + 같은 색상/두께 혼합 재단 + 분석 제안 포함")
 
 uploaded_file = st.file_uploader("BOM 엑셀 업로드", type=["xlsx", "xls"])
 
@@ -444,13 +491,20 @@ if bom_items:
 
         with right:
             st.subheader("최적화 조건")
+            preset = st.selectbox("원장 규격 선택", list(BOARD_PRESETS.keys()), index=0)
+
+            if BOARD_PRESETS[preset] is None:
+                preset_w, preset_h = 2440.0, 1220.0
+            else:
+                preset_w, preset_h = BOARD_PRESETS[preset]
+
             r1, r2 = st.columns(2)
             with r1:
-                board_width = st.number_input("원판 가로(mm)", min_value=100.0, value=2440.0, step=1.0, format="%.1f")
-                kerf = st.number_input("톱날폭(mm)", min_value=0.0, value=3.0, step=0.1, format="%.1f")
+                board_width = st.number_input("원장 가로(mm)", min_value=100.0, value=float(preset_w), step=1.0, format="%.1f")
+                kerf = st.number_input("톱날폭(mm)", min_value=0.0, value=4.8, step=0.1, format="%.1f")
             with r2:
-                board_height = st.number_input("원판 세로(mm)", min_value=100.0, value=1220.0, step=1.0, format="%.1f")
-                margin = st.number_input("여유치(mm)", min_value=0.0, value=20.0, step=0.1, format="%.1f")
+                board_height = st.number_input("원장 세로(mm)", min_value=100.0, value=float(preset_h), step=1.0, format="%.1f")
+                margin = st.number_input("여유치(mm)", min_value=0.0, value=10.0, step=0.1, format="%.1f")
 
             rotate_allowed = st.checkbox("회전 허용", value=True)
 
@@ -486,6 +540,19 @@ if bom_items:
                         )
                         result["kerf_mm"] = float(kerf)
                         st.session_state["opt_result"] = result
+
+                        analysis_df, analysis_summary = analyze_alternatives(
+                            optimized_items,
+                            float(board_width),
+                            float(board_height),
+                            float(kerf),
+                            float(margin),
+                            rotate_allowed,
+                            mix_same_color_thickness,
+                        )
+                        st.session_state["analysis_df"] = analysis_df
+                        st.session_state["analysis_summary"] = analysis_summary
+
                 except Exception as exc:
                     st.error(f"최적화 중 오류: {exc}")
                     st.code(traceback.format_exc())
@@ -494,7 +561,7 @@ if bom_items:
             if opt_result:
                 st.subheader("최적화 결과")
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("사용 원판 수", opt_result["used_boards"])
+                m1.metric("사용 원장 수", opt_result["used_boards"])
                 m2.metric("수율", f"{opt_result['yield_rate']}%")
                 m3.metric("자투리 면적", f"{opt_result['waste_area']:,}")
                 m4.metric("미배치 수", opt_result["unplaced_count"])
@@ -519,9 +586,14 @@ if bom_items:
                     )
                     st.dataframe(pd.DataFrame(selected_sheet["placements"]), use_container_width=True, height=260)
 
-                if opt_result["unplaced_parts"]:
-                    with st.expander("미배치 부품", expanded=False):
-                        st.dataframe(pd.DataFrame(opt_result["unplaced_parts"]), use_container_width=True)
+                analysis_df = st.session_state.get("analysis_df")
+                analysis_summary = st.session_state.get("analysis_summary", "")
+                if analysis_df is not None:
+                    st.subheader("수율 개선 분석")
+                    if analysis_summary:
+                        st.info(analysis_summary)
+                    st.dataframe(analysis_df, use_container_width=True)
+                    st.caption("예: 여유치를 변경하거나, 원장을 4x6(1220 x 1830)로 바꿨을 때의 수율 비교")
     else:
         st.info("제품코드를 입력하거나 선택하세요.")
 else:
