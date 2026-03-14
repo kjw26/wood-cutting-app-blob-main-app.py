@@ -1,172 +1,16 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.responses import HTMLResponse, JSONResponse
-import pandas as pd
 import math
 import re
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-app = FastAPI(title="Wood Cutting Optimizer", version="1.0.0")
-
-# In-memory storage for a simple GitHub-ready single-file app
-BOM_ITEMS: List[Dict[str, Any]] = []
-
-
-HTML_PAGE = """
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Wood Cutting Optimizer</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 24px; background: #f7f7f7; color: #222; }
-        .wrap { max-width: 1100px; margin: 0 auto; }
-        .card { background: white; border-radius: 12px; padding: 18px; margin-bottom: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
-        h1, h2 { margin-top: 0; }
-        input, button, select { padding: 10px 12px; margin: 4px 0; }
-        input[type="text"], input[type="number"] { width: 240px; }
-        button { cursor: pointer; border: 1px solid #ccc; border-radius: 8px; background: #fff; }
-        button:hover { background: #f0f0f0; }
-        .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-        .muted { color: #666; font-size: 14px; }
-        #result, #products, #bom { white-space: pre-wrap; }
-        svg { background: white; border: 1px solid #ddd; }
-        table { border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 14px; }
-        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-        .pill { display: inline-block; padding: 4px 8px; border-radius: 999px; background: #eef4ff; margin-right: 6px; }
-    </style>
-</head>
-<body>
-<div class="wrap">
-    <div class="card">
-        <h1>목재 재단 프로그램</h1>
-        <div class="muted">단일 파일 FastAPI 앱입니다. 엑셀 BOM 업로드, 제품 조회, 최적화, 분할도 확인이 가능합니다.</div>
-    </div>
-
-    <div class="card">
-        <h2>1. BOM 업로드</h2>
-        <div class="row">
-            <input type="file" id="fileInput" accept=".xlsx,.xls" />
-            <button onclick="uploadBom()">업로드</button>
-        </div>
-        <div id="uploadStatus" class="muted"></div>
-    </div>
-
-    <div class="card">
-        <h2>2. 제품 조회</h2>
-        <div class="row">
-            <button onclick="loadProducts()">제품 목록 불러오기</button>
-        </div>
-        <div id="products"></div>
-    </div>
-
-    <div class="card">
-        <h2>3. 제품 BOM 조회</h2>
-        <div class="row">
-            <input type="text" id="productCode" placeholder="제품코드 입력" />
-            <button onclick="loadBom()">BOM 조회</button>
-        </div>
-        <div id="bom"></div>
-    </div>
-
-    <div class="card">
-        <h2>4. 재단 최적화</h2>
-        <div class="row">
-            <input type="text" id="optProductCode" placeholder="제품코드 입력" />
-            <input type="number" id="boardWidth" value="2440" placeholder="원판 가로" />
-            <input type="number" id="boardHeight" value="1220" placeholder="원판 세로" />
-            <input type="number" id="kerf" value="3" placeholder="톱날폭" />
-            <input type="number" id="margin" value="5" placeholder="여유치" />
-            <label><input type="checkbox" id="rotateAllowed" checked /> 회전 허용</label>
-            <button onclick="optimize()">최적화 실행</button>
-        </div>
-        <div id="result"></div>
-        <div id="svgWrap"></div>
-    </div>
-</div>
-
-<script>
-async function uploadBom() {
-    const fileInput = document.getElementById("fileInput");
-    if (!fileInput.files.length) {
-        alert("엑셀 파일을 선택하세요.");
-        return;
-    }
-    const fd = new FormData();
-    fd.append("file", fileInput.files[0]);
-
-    const res = await fetch("/upload-bom", { method: "POST", body: fd });
-    const data = await res.json();
-    document.getElementById("uploadStatus").textContent = JSON.stringify(data, null, 2);
-}
-
-async function loadProducts() {
-    const res = await fetch("/products");
-    const data = await res.json();
-    document.getElementById("products").innerHTML =
-        (data.products || []).map(p => `<span class="pill">${p}</span>`).join(" ");
-}
-
-async function loadBom() {
-    const code = document.getElementById("productCode").value.trim();
-    if (!code) return alert("제품코드를 입력하세요.");
-    const res = await fetch(`/bom/${encodeURIComponent(code)}`);
-    const data = await res.json();
-    document.getElementById("bom").textContent = JSON.stringify(data, null, 2);
-}
-
-function renderSvg(result) {
-    const scale = 0.28;
-    let html = "";
-    for (const sheet of result.sheets) {
-        let parts = "";
-        for (const p of sheet.placements) {
-            parts += `
-                <rect x="${p.x_mm * scale}" y="${p.y_mm * scale}" width="${p.width_mm * scale}" height="${p.height_mm * scale}"
-                      fill="#dbeafe" stroke="#1e40af" stroke-width="1"></rect>
-                <text x="${p.x_mm * scale + 4}" y="${p.y_mm * scale + 16}" font-size="12" fill="#111">${p.part_code}</text>
-                <text x="${p.x_mm * scale + 4}" y="${p.y_mm * scale + 30}" font-size="10" fill="#444">${p.width_mm}x${p.height_mm}</text>
-            `;
-        }
-        html += `
-            <div style="margin-top:18px;">
-                <h3>Sheet ${sheet.sheet_no}</h3>
-                <svg width="${result.board_width_mm * scale}" height="${result.board_height_mm * scale}">
-                    <rect x="0" y="0" width="${result.board_width_mm * scale}" height="${result.board_height_mm * scale}"
-                          fill="white" stroke="#333" stroke-width="2"></rect>
-                    ${parts}
-                </svg>
-            </div>
-        `;
-    }
-    document.getElementById("svgWrap").innerHTML = html;
-}
-
-async function optimize() {
-    const payload = {
-        product_code: document.getElementById("optProductCode").value.trim(),
-        board_width_mm: Number(document.getElementById("boardWidth").value),
-        board_height_mm: Number(document.getElementById("boardHeight").value),
-        kerf_mm: Number(document.getElementById("kerf").value),
-        margin_mm: Number(document.getElementById("margin").value),
-        rotate_allowed: document.getElementById("rotateAllowed").checked
-    };
-    const res = await fetch("/optimize", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    document.getElementById("result").textContent = JSON.stringify(data, null, 2);
-    if (data.sheets) renderSvg(data);
-}
-</script>
-</body>
-</html>
-"""
+import pandas as pd
+import streamlit as st
+import streamlit.components.v1 as components
 
 
-def parse_spec(spec_raw: Any):
+st.set_page_config(page_title="Wood Cutting Optimizer", layout="wide")
+
+
+def parse_spec(spec_raw: Any) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     if spec_raw is None or (isinstance(spec_raw, float) and math.isnan(spec_raw)):
         return None, None, None
     text = str(spec_raw).strip()
@@ -176,7 +20,7 @@ def parse_spec(spec_raw: Any):
     return int(match.group(1)), int(match.group(2)), int(match.group(3))
 
 
-def normalize_value(value: Any):
+def normalize_value(value: Any) -> Any:
     if value is None:
         return None
     if isinstance(value, float) and math.isnan(value):
@@ -186,7 +30,7 @@ def normalize_value(value: Any):
 
 def to_int(value: Any, default: int = 0) -> int:
     value = normalize_value(value)
-    if value is None or value == "":
+    if value in (None, ""):
         return default
     try:
         return int(float(value))
@@ -210,9 +54,7 @@ def is_cutting_target(row: Dict[str, Any], width: Optional[int], height: Optiona
     return True
 
 
-def load_bom_from_dataframe(df: pd.DataFrame) -> Dict[str, Any]:
-    global BOM_ITEMS
-
+def load_bom_from_dataframe(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     df = df.fillna("")
     items: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
@@ -238,7 +80,7 @@ def load_bom_from_dataframe(df: pd.DataFrame) -> Dict[str, Any]:
             "thickness_mm": thickness,
             "material_name": str(raw.get("재질") or "").strip(),
             "process_name": str(raw.get("소요공정") or "").strip(),
-            "is_cutting_target": is_cutting_target(raw, width, height, thickness)
+            "is_cutting_target": is_cutting_target(raw, width, height, thickness),
         }
 
         if not product_code:
@@ -250,22 +92,14 @@ def load_bom_from_dataframe(df: pd.DataFrame) -> Dict[str, Any]:
 
         items.append(item)
 
-    BOM_ITEMS = items
-
-    product_count = len(sorted({x["product_code"] for x in items if x["product_code"]}))
-    return {
-        "imported_rows": len(items),
-        "product_count": product_count,
-        "cutting_target_rows": sum(1 for x in items if x["is_cutting_target"]),
-        "error_rows": len(errors),
-        "errors": errors[:50]
-    }
+    return items, errors
 
 
 def expand_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    expanded = []
+    expanded: List[Dict[str, Any]] = []
     for p in parts:
-        for _ in range(max(1, int(p["qty"]))):
+        repeat = max(1, int(p["qty"]))
+        for _ in range(repeat):
             expanded.append({
                 "product_code": p["product_code"],
                 "part_code": p["part_code"],
@@ -273,7 +107,7 @@ def expand_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "width_mm": p["width_mm"],
                 "height_mm": p["height_mm"],
                 "thickness_mm": p["thickness_mm"],
-                "material_name": p["material_name"]
+                "material_name": p["material_name"],
             })
     expanded.sort(key=lambda x: x["width_mm"] * x["height_mm"], reverse=True)
     return expanded
@@ -295,20 +129,19 @@ def try_place_in_free_rect(part: Dict[str, Any], free_rect: Dict[str, int], kerf
                 "height_mm": h,
                 "rotated": rotated,
                 "part_code": part["part_code"],
-                "part_name": part["part_name"]
+                "part_name": part["part_name"],
             }
-
             right = {
                 "x": free_rect["x"] + need_w,
                 "y": free_rect["y"],
                 "w": free_rect["w"] - need_w,
-                "h": h
+                "h": h,
             }
             bottom = {
                 "x": free_rect["x"],
                 "y": free_rect["y"] + need_h,
                 "w": free_rect["w"],
-                "h": free_rect["h"] - need_h
+                "h": free_rect["h"] - need_h,
             }
             new_rects = [r for r in (right, bottom) if r["w"] > 20 and r["h"] > 20]
             return placement, new_rects
@@ -319,7 +152,7 @@ def optimize_parts(parts: List[Dict[str, Any]], board_width: int, board_height: 
     usable_w = board_width - margin * 2
     usable_h = board_height - margin * 2
     if usable_w <= 0 or usable_h <= 0:
-        raise HTTPException(status_code=400, detail="원판 크기보다 여유치가 큽니다.")
+        raise ValueError("원판 크기보다 여유치가 큽니다.")
 
     sheets = []
     unplaced = []
@@ -346,7 +179,7 @@ def optimize_parts(parts: List[Dict[str, Any]], board_width: int, board_height: 
                 placement["x_mm"] += margin
                 placement["y_mm"] += margin
                 sheet["placements"].append(placement)
-                used_rect = sheet["free_rects"].pop(best_idx)
+                sheet["free_rects"].pop(best_idx)
                 sheet["free_rects"].extend(new_rects)
                 placed = True
                 break
@@ -355,7 +188,7 @@ def optimize_parts(parts: List[Dict[str, Any]], board_width: int, board_height: 
             new_sheet = {
                 "sheet_no": len(sheets) + 1,
                 "placements": [],
-                "free_rects": [{"x": 0, "y": 0, "w": usable_w, "h": usable_h}]
+                "free_rects": [{"x": 0, "y": 0, "w": usable_w, "h": usable_h}],
             }
             placement, new_rects = try_place_in_free_rect(part, new_sheet["free_rects"][0], kerf, rotate_allowed)
             if placement:
@@ -383,74 +216,168 @@ def optimize_parts(parts: List[Dict[str, Any]], board_width: int, board_height: 
         "yield_rate": yield_rate,
         "unplaced_count": len(unplaced),
         "unplaced_parts": unplaced,
-        "sheets": [{"sheet_no": s["sheet_no"], "placements": s["placements"]} for s in sheets]
+        "sheets": [{"sheet_no": s["sheet_no"], "placements": s["placements"]} for s in sheets],
     }
 
 
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return HTML_PAGE
+def make_svg(sheet: Dict[str, Any], board_width_mm: int, board_height_mm: int) -> str:
+    scale = min(900 / board_width_mm, 600 / board_height_mm)
+    svg_width = int(board_width_mm * scale)
+    svg_height = int(board_height_mm * scale)
+
+    parts_svg = []
+    for p in sheet["placements"]:
+        x = p["x_mm"] * scale
+        y = p["y_mm"] * scale
+        w = p["width_mm"] * scale
+        h = p["height_mm"] * scale
+        label = f'{p["part_code"]} ({p["width_mm"]}x{p["height_mm"]})'
+        parts_svg.append(
+            f"""
+            <g>
+                <rect x="{x}" y="{y}" width="{w}" height="{h}"
+                      fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.2"></rect>
+                <text x="{x + 4}" y="{y + 16}" font-size="12" fill="#111">{label}</text>
+            </g>
+            """
+        )
+
+    return f"""
+    <div style="overflow:auto; border:1px solid #ddd; padding:12px; background:#fff;">
+      <svg width="{svg_width}" height="{svg_height}" xmlns="http://www.w3.org/2000/svg">
+          <rect x="0" y="0" width="{svg_width}" height="{svg_height}"
+                fill="white" stroke="#333" stroke-width="2"></rect>
+          {''.join(parts_svg)}
+      </svg>
+    </div>
+    """
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+st.title("목재 재단 프로그램")
+st.caption("Streamlit Cloud에 바로 올릴 수 있는 단일 파일 버전입니다.")
 
+with st.expander("지원 BOM 컬럼", expanded=False):
+    st.markdown("""
+    - 품목코드
+    - 부품코드
+    - 품목명
+    - 색상
+    - 정소요량
+    - 실소요량
+    - 규격
+    - 재질
+    - 소요공정
+    - 대표이미지
+    """)
 
-@app.post("/upload-bom")
-async def upload_bom(file: UploadFile = File(...)):
+uploaded_file = st.file_uploader("BOM 엑셀 업로드", type=["xlsx", "xls"])
+
+if uploaded_file is not None:
     try:
-        df = pd.read_excel(file.file)
+        df = pd.read_excel(uploaded_file)
+        items, errors = load_bom_from_dataframe(df)
+        st.session_state["bom_items"] = items
+        st.session_state["bom_errors"] = errors
+        st.success(f"업로드 완료: {len(items)}행, 오류 {len(errors)}건")
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"엑셀 파일을 읽을 수 없습니다: {exc}") from exc
+        st.error(f"엑셀 파일을 읽는 중 오류가 발생했습니다: {exc}")
 
-    result = load_bom_from_dataframe(df)
-    return {
-        "success": True,
-        "file_name": file.filename,
-        **result
-    }
+bom_items = st.session_state.get("bom_items", [])
+bom_errors = st.session_state.get("bom_errors", [])
 
+if bom_items:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("업로드 행 수", len(bom_items))
+    with col2:
+        st.metric("제품 수", len(sorted({x["product_code"] for x in bom_items if x["product_code"]})))
+    with col3:
+        st.metric("재단 대상 행 수", sum(1 for x in bom_items if x["is_cutting_target"]))
 
-@app.get("/products")
-def get_products(keyword: str = Query(default="")):
-    keyword = keyword.strip().lower()
-    products = sorted({x["product_code"] for x in BOM_ITEMS if x["product_code"]})
-    if keyword:
-        products = [p for p in products if keyword in p.lower()]
-    return {"count": len(products), "products": products}
+    if bom_errors:
+        with st.expander(f"검증 오류 {len(bom_errors)}건", expanded=False):
+            st.dataframe(pd.DataFrame(bom_errors), use_container_width=True)
 
+    products = sorted({x["product_code"] for x in bom_items if x["product_code"]})
+    if not products:
+        st.warning("품목코드가 있는 데이터가 없습니다.")
+    else:
+        st.subheader("제품 조회")
+        selected_product = st.selectbox("제품코드 선택", products)
 
-@app.get("/bom/{product_code}")
-def get_bom(product_code: str, cutting_only: bool = Query(default=False)):
-    items = [x for x in BOM_ITEMS if x["product_code"] == product_code]
-    if cutting_only:
-        items = [x for x in items if x["is_cutting_target"]]
-    if not items:
-        raise HTTPException(status_code=404, detail="해당 제품코드의 BOM이 없습니다.")
-    return {
-        "product_code": product_code,
-        "count": len(items),
-        "items": items
-    }
+        product_items = [x for x in bom_items if x["product_code"] == selected_product]
+        cutting_items = [x for x in product_items if x["is_cutting_target"]]
 
+        left, right = st.columns([1.1, 1.4])
 
-@app.post("/optimize")
-def optimize(payload: Dict[str, Any]):
-    product_code = str(payload.get("product_code") or "").strip()
-    if not product_code:
-        raise HTTPException(status_code=400, detail="product_code가 필요합니다.")
+        with left:
+            st.markdown("### BOM 목록")
+            show_cutting_only = st.checkbox("재단 대상만 보기", value=True)
+            view_items = cutting_items if show_cutting_only else product_items
+            st.dataframe(pd.DataFrame(view_items), use_container_width=True, height=420)
 
-    board_width = to_int(payload.get("board_width_mm"), 2440)
-    board_height = to_int(payload.get("board_height_mm"), 1220)
-    kerf = to_int(payload.get("kerf_mm"), 3)
-    margin = to_int(payload.get("margin_mm"), 5)
-    rotate_allowed = bool(payload.get("rotate_allowed", True))
+        with right:
+            st.markdown("### 최적화 조건")
+            c1, c2 = st.columns(2)
+            with c1:
+                board_width = st.number_input("원판 가로(mm)", min_value=100, value=2440, step=10)
+                kerf = st.number_input("톱날폭(mm)", min_value=0, value=3, step=1)
+            with c2:
+                board_height = st.number_input("원판 세로(mm)", min_value=100, value=1220, step=10)
+                margin = st.number_input("여유치(mm)", min_value=0, value=5, step=1)
 
-    parts = [x for x in BOM_ITEMS if x["product_code"] == product_code and x["is_cutting_target"]]
-    if not parts:
-        raise HTTPException(status_code=404, detail="최적화 가능한 재단 대상 부품이 없습니다.")
+            rotate_allowed = st.checkbox("회전 허용", value=True)
 
-    result = optimize_parts(parts, board_width, board_height, kerf, margin, rotate_allowed)
-    result["product_code"] = product_code
-    return JSONResponse(result)
+            if st.button("최적화 실행", type="primary", use_container_width=True):
+                if not cutting_items:
+                    st.error("최적화 가능한 재단 대상 부품이 없습니다.")
+                else:
+                    try:
+                        result = optimize_parts(
+                            cutting_items,
+                            int(board_width),
+                            int(board_height),
+                            int(kerf),
+                            int(margin),
+                            rotate_allowed,
+                        )
+                        st.session_state["opt_result"] = result
+                        st.session_state["opt_product"] = selected_product
+                    except Exception as exc:
+                        st.error(str(exc))
+
+            opt_result = st.session_state.get("opt_result")
+            opt_product = st.session_state.get("opt_product")
+
+            if opt_result and opt_product == selected_product:
+                st.markdown("### 최적화 결과")
+                r1, r2, r3, r4 = st.columns(4)
+                with r1:
+                    st.metric("사용 원판 수", opt_result["used_boards"])
+                with r2:
+                    st.metric("수율", f'{opt_result["yield_rate"]}%')
+                with r3:
+                    st.metric("자투리 면적", f'{opt_result["waste_area"]:,}')
+                with r4:
+                    st.metric("미배치 수", opt_result["unplaced_count"])
+
+                if opt_result["sheets"]:
+                    labels = [f'Sheet {s["sheet_no"]}' for s in opt_result["sheets"]]
+                    selected_sheet_label = st.selectbox("시트 선택", labels)
+                    selected_sheet_no = int(selected_sheet_label.replace("Sheet ", ""))
+                    selected_sheet = next(s for s in opt_result["sheets"] if s["sheet_no"] == selected_sheet_no)
+
+                    components.html(
+                        make_svg(selected_sheet, opt_result["board_width_mm"], opt_result["board_height_mm"]),
+                        height=700,
+                        scrolling=True,
+                    )
+
+                    st.dataframe(pd.DataFrame(selected_sheet["placements"]), use_container_width=True, height=260)
+
+                if opt_result["unplaced_parts"]:
+                    with st.expander("미배치 부품", expanded=False):
+                        st.dataframe(pd.DataFrame(opt_result["unplaced_parts"]), use_container_width=True)
+
+else:
+    st.info("왼쪽 위에서 BOM 엑셀 파일을 업로드하면 제품 조회와 최적화를 사용할 수 있습니다.")
