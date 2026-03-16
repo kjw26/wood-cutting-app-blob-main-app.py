@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="목재 재단 프로그램 Fast v7", layout="wide")
+st.set_page_config(page_title="목재 재단 프로그램 Fast v6", layout="wide")
 
 BOARD_PRESETS = {
     "기본 4x8 (1220 x 2440)": (2440.0, 1220.0),
@@ -188,7 +188,19 @@ def optimize_group(parts, board_width, board_height, kerf, margin, rotate_allowe
             if best is None:
                 continue
             rect = sheet["free_rects"].pop(best["rect_index"])
-            placement = {"x_mm": round(rect["x"] + margin, 1), "y_mm": round(rect["y"] + margin, 1), "width_mm": round(best["w"], 1), "height_mm": round(best["h"], 1), "rotated": best["rotated"], "part_code": part["part_code"], "part_name": part["part_name"], "product_code": part["product_code"], "color": part["color"], "thickness_mm": round(part["thickness_mm"], 1), "material_name": part["material_name"]}
+            placement = {
+                "x_mm": round(rect["x"] + margin, 1),
+                "y_mm": round(rect["y"] + margin, 1),
+                "width_mm": round(best["w"], 1),
+                "height_mm": round(best["h"], 1),
+                "rotated": best["rotated"],
+                "part_code": part["part_code"],
+                "part_name": part["part_name"],
+                "product_code": part["product_code"],
+                "color": part["color"],
+                "thickness_mm": round(part["thickness_mm"], 1),
+                "material_name": part["material_name"],
+            }
             sheet["placements"].append(placement)
             sheet["free_rects"].extend(split_rect_guillotine(rect, best["w"], best["h"], kerf))
             sheet["free_rects"] = prune_rects(sheet["free_rects"])
@@ -201,7 +213,19 @@ def optimize_group(parts, board_width, board_height, kerf, margin, rotate_allowe
                 unplaced.append(part)
             else:
                 rect = new_sheet["free_rects"].pop(best["rect_index"])
-                placement = {"x_mm": round(rect["x"] + margin, 1), "y_mm": round(rect["y"] + margin, 1), "width_mm": round(best["w"], 1), "height_mm": round(best["h"], 1), "rotated": best["rotated"], "part_code": part["part_code"], "part_name": part["part_name"], "product_code": part["product_code"], "color": part["color"], "thickness_mm": round(part["thickness_mm"], 1), "material_name": part["material_name"]}
+                placement = {
+                    "x_mm": round(rect["x"] + margin, 1),
+                    "y_mm": round(rect["y"] + margin, 1),
+                    "width_mm": round(best["w"], 1),
+                    "height_mm": round(best["h"], 1),
+                    "rotated": best["rotated"],
+                    "part_code": part["part_code"],
+                    "part_name": part["part_name"],
+                    "product_code": part["product_code"],
+                    "color": part["color"],
+                    "thickness_mm": round(part["thickness_mm"], 1),
+                    "material_name": part["material_name"],
+                }
                 new_sheet["placements"].append(placement)
                 new_sheet["free_rects"].extend(split_rect_guillotine(rect, best["w"], best["h"], kerf))
                 new_sheet["free_rects"] = prune_rects(new_sheet["free_rects"])
@@ -225,7 +249,10 @@ def optimize_parts(parts, board_width, board_height, kerf, margin, rotate_allowe
     all_sheets = []
     all_unplaced = []
     for key, group_parts in groups.items():
-        group_name = f"색상:{key[0]} / 두께:{key[1]}" if mix_same_color_thickness else f"제품:{key[0]} / 색상:{key[1]} / 두께:{key[2]}"
+        if mix_same_color_thickness:
+            group_name = f"색상:{key[0]} / 두께:{key[1]}"
+        else:
+            group_name = f"제품:{key[0]} / 색상:{key[1]} / 두께:{key[2]}"
         sheets, unplaced = optimize_group(group_parts, board_width, board_height, kerf, margin, rotate_allowed, group_name)
         start_no = len(all_sheets)
         for i, s in enumerate(sheets, start=1):
@@ -239,6 +266,23 @@ def optimize_parts(parts, board_width, board_height, kerf, margin, rotate_allowe
     waste_area = max(0.0, total_board_area - total_part_area)
     yield_rate = round((total_part_area / total_board_area) * 100, 2) if total_board_area else 0.0
     return {"board_width_mm": round(board_width, 1), "board_height_mm": round(board_height, 1), "used_boards": used_boards, "total_part_area": round(total_part_area, 1), "waste_area": round(waste_area, 1), "yield_rate": yield_rate, "unplaced_count": len(all_unplaced), "unplaced_parts": all_unplaced, "sheets": all_sheets}
+
+def analyze_alternatives(parts, current_board_w, current_board_h, kerf, margin, rotate_allowed, mix_same_color_thickness):
+    scenarios = [("현재 조건", current_board_w, current_board_h, margin), ("여유치 5.0", current_board_w, current_board_h, 5.0), ("여유치 8.0", current_board_w, current_board_h, 8.0), ("여유치 10.0", current_board_w, current_board_h, 10.0), ("원장 4x6 / 여유치 10.0", 1830.0, 1220.0, 10.0)]
+    rows = []
+    for name, bw, bh, mg in scenarios:
+        try:
+            result = optimize_parts(parts, bw, bh, kerf, mg, rotate_allowed, mix_same_color_thickness)
+            rows.append({"시나리오": name, "원장 가로": bw, "원장 세로": bh, "여유치": mg, "사용 원장 수": result["used_boards"], "수율(%)": result["yield_rate"], "자투리 면적": result["waste_area"]})
+        except Exception:
+            rows.append({"시나리오": name, "원장 가로": bw, "원장 세로": bh, "여유치": mg, "사용 원장 수": None, "수율(%)": None, "자투리 면적": None})
+    df = pd.DataFrame(rows)
+    valid = df.dropna(subset=["수율(%)"])
+    summary = ""
+    if not valid.empty:
+        best = valid.sort_values(["수율(%)", "사용 원장 수"], ascending=[False, True]).iloc[0]
+        summary = f"분석 결과, '{best['시나리오']}' 조건이 가장 높은 수율을 보였습니다. 예상 수율은 {best['수율(%)']}%이며, 사용 원장 수는 {int(best['사용 원장 수'])}장입니다."
+    return df, summary
 
 def make_svg(sheet, board_width_mm, board_height_mm, kerf=0.0):
     scale = min(900 / board_width_mm, 600 / board_height_mm)
@@ -259,8 +303,8 @@ def make_svg(sheet, board_width_mm, board_height_mm, kerf=0.0):
             kerf_svg.append(f'<rect x="{x}" y="{y + h}" width="{w}" height="{k}" fill="#fca5a5" fill-opacity="0.35"></rect>')
     return f'<div style="overflow:auto; border:1px solid #ddd; padding:12px; background:#fff;"><svg width="{svg_width}" height="{svg_height}" xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="{svg_width}" height="{svg_height}" fill="white" stroke="#333" stroke-width="2"></rect>{"".join(kerf_svg)}{"".join(parts_svg)}</svg></div>'
 
-st.title("목재 재단 프로그램 Fast v7")
-st.caption("총 재단 수량 자동 계산 + 일괄 실제 재단 수량 입력")
+st.title("목재 재단 프로그램 Fast v6")
+st.caption("총 재단 수량 강조 + 상단 합계 표시")
 
 uploaded_file = st.file_uploader("BOM 엑셀 업로드", type=["xlsx", "xls"])
 if uploaded_file is not None:
@@ -274,67 +318,159 @@ if uploaded_file is not None:
         st.error(f"엑셀 파일 읽기 오류: {exc}")
 
 bom_items = st.session_state.get("bom_items", [])
+bom_errors = st.session_state.get("bom_errors", [])
+
 if bom_items:
+    c1, c2, c3 = st.columns(3)
+    c1.metric("업로드 행 수", len(bom_items))
+    c2.metric("제품 수", len(sorted({x["product_code"] for x in bom_items if x["product_code"]})))
+    c3.metric("재단 대상 행 수", sum(1 for x in bom_items if x["is_cutting_target"]))
+
+    if bom_errors:
+        with st.expander(f"검증 오류 {len(bom_errors)}건", expanded=False):
+            st.dataframe(pd.DataFrame(bom_errors), use_container_width=True)
+
     products = sorted({x["product_code"] for x in bom_items if x["product_code"]})
     query = st.text_input("제품코드 입력", value=st.session_state.get("product_query", ""))
     st.session_state["product_query"] = query
     matched_products = [p for p in products if query.strip().upper() in p.upper()] if query.strip() else products[:50]
     selected_products = st.multiselect("조회 결과 / 재단 대상 제품 선택", matched_products, default=matched_products[:1] if matched_products else [])
+
     if selected_products:
         target_items = [x for x in bom_items if x["product_code"] in selected_products and x["is_cutting_target"] and x.get("width_mm") and x.get("height_mm") and x.get("thickness_mm")]
         left, right = st.columns([1.25, 1.2])
+
         with left:
+            st.subheader("BOM 목록")
             mix_same_color_thickness = st.checkbox("같은 색상 + 같은 두께 혼합 재단", value=False)
-            bulk_actual_cut_qty = st.number_input("실제 재단 수량 일괄 입력", min_value=1, value=1, step=1)
+            st.caption("selected 체크된 품목만 재단합니다.")
+            st.caption("총 재단 수량 = BOM 재단 수량 × 실제 재단 수량")
+
             editable_rows = []
             for item in target_items:
                 row = dict(item)
                 row["selected"] = True
                 row["bom_qty"] = max(1, to_int(row.get("bom_qty"), 1))
-                row["actual_cut_qty"] = int(bulk_actual_cut_qty)
+                row["actual_cut_qty"] = max(1, to_int(row.get("actual_cut_qty"), 1))
                 row["qty"] = row["bom_qty"] * row["actual_cut_qty"]
                 editable_rows.append(row)
+
             temp_df = pd.DataFrame(editable_rows)
+            sum_selected = int(temp_df.loc[temp_df["selected"] == True, "qty"].sum()) if not temp_df.empty else 0
+            sum_rows = int((temp_df["selected"] == True).sum()) if not temp_df.empty else 0
+
+            s1, s2 = st.columns(2)
+            s1.metric("선택 품목 수", sum_rows)
+            s2.metric("총 재단 수량 합계", sum_selected)
+
             edited_df = st.data_editor(
                 temp_df,
                 use_container_width=True,
                 height=520,
-                disabled=["row_no","product_code","part_code","part_name","color","spec_raw","width_mm","height_mm","thickness_mm","material_name","process_name","is_cutting_target","qty"],
+                disabled=["row_no", "product_code", "part_code", "part_name", "color", "spec_raw", "width_mm", "height_mm", "thickness_mm", "material_name", "process_name", "is_cutting_target", "qty"],
                 column_config={
                     "selected": st.column_config.CheckboxColumn("선택", default=True),
                     "bom_qty": st.column_config.NumberColumn("BOM 재단 수량", min_value=1, step=1, format="%d"),
                     "actual_cut_qty": st.column_config.NumberColumn("실제 재단 수량", min_value=1, step=1, format="%d"),
                     "qty": st.column_config.NumberColumn("총 재단 수량", format="%d"),
+                    "width_mm": st.column_config.NumberColumn("가로(mm)", format="%.1f"),
+                    "height_mm": st.column_config.NumberColumn("세로(mm)", format="%.1f"),
+                    "thickness_mm": st.column_config.NumberColumn("두께(mm)", format="%.1f"),
                 },
             )
+
             if not edited_df.empty:
                 edited_df["bom_qty"] = edited_df["bom_qty"].fillna(1).astype(int).clip(lower=1)
                 edited_df["actual_cut_qty"] = edited_df["actual_cut_qty"].fillna(1).astype(int).clip(lower=1)
                 edited_df["qty"] = edited_df["bom_qty"] * edited_df["actual_cut_qty"]
-                st.metric("총 재단 수량 합계", int(edited_df.loc[edited_df["selected"] == True, "qty"].sum()))
+                sum_selected_after = int(edited_df.loc[edited_df["selected"] == True, "qty"].sum())
+                st.markdown(f'<div style="margin-top:8px;padding:10px 14px;border-radius:10px;background:#fff3cd;border:1px solid #ffe69c;color:#7a4b00;font-weight:700;">선택된 총 재단 수량 합계: {sum_selected_after:,}</div>', unsafe_allow_html=True)
+
         with right:
+            st.subheader("최적화 조건")
             preset = st.selectbox("원장 규격 선택", list(BOARD_PRESETS.keys()), index=0)
             preset_w, preset_h = (2440.0, 1220.0) if BOARD_PRESETS[preset] is None else BOARD_PRESETS[preset]
-            board_width = st.number_input("원장 가로(mm)", min_value=100.0, value=float(preset_w), step=1.0, format="%.1f")
-            board_height = st.number_input("원장 세로(mm)", min_value=100.0, value=float(preset_h), step=1.0, format="%.1f")
-            kerf = st.number_input("톱날폭(mm)", min_value=0.0, value=4.8, step=0.1, format="%.1f")
-            margin = st.number_input("여유치(mm)", min_value=0.0, value=10.0, step=0.1, format="%.1f")
-            cut_count = st.number_input("재단 매수", min_value=1, value=1, step=1)
+
+            r1, r2 = st.columns(2)
+            with r1:
+                board_width = st.number_input("원장 가로(mm)", min_value=100.0, value=float(preset_w), step=1.0, format="%.1f")
+                kerf = st.number_input("톱날폭(mm)", min_value=0.0, value=4.8, step=0.1, format="%.1f")
+                board_batch = st.number_input("한 번에 재단할 원장 매수", min_value=1, value=1, step=1)
+            with r2:
+                board_height = st.number_input("원장 세로(mm)", min_value=100.0, value=float(preset_h), step=1.0, format="%.1f")
+                margin = st.number_input("여유치(mm)", min_value=0.0, value=10.0, step=0.1, format="%.1f")
+                cut_count = st.number_input("재단 매수", min_value=1, value=1, step=1)
+
+            rotate_allowed = st.checkbox("회전 허용", value=True)
+
             if st.button("최적화 실행", type="primary", use_container_width=True):
-                optimized_items = edited_df.to_dict("records")
-                optimized_items = [x for x in optimized_items if bool(x.get("selected"))]
-                for item in optimized_items:
-                    item["qty"] = int(item["bom_qty"]) * int(item["actual_cut_qty"])
-                optimized_items = apply_cut_count(optimized_items, int(cut_count))
-                result = optimize_parts(optimized_items, float(board_width), float(board_height), float(kerf), float(margin), True, mix_same_color_thickness)
-                result["kerf_mm"] = float(kerf)
-                st.session_state["opt_result"] = result
+                try:
+                    optimized_items = edited_df.to_dict("records")
+                    optimized_items = [x for x in optimized_items if bool(x.get("selected")) and x.get("width_mm") and x.get("height_mm") and x.get("thickness_mm")]
+                    total_qty = 0
+                    for item in optimized_items:
+                        item["bom_qty"] = max(1, to_int(item.get("bom_qty"), 1))
+                        item["actual_cut_qty"] = max(1, to_int(item.get("actual_cut_qty"), 1))
+                        item["qty"] = item["bom_qty"] * item["actual_cut_qty"]
+                        item["width_mm"] = to_float(item.get("width_mm"), 0.0)
+                        item["height_mm"] = to_float(item.get("height_mm"), 0.0)
+                        item["thickness_mm"] = to_float(item.get("thickness_mm"), 0.0)
+                        total_qty += item["qty"]
+                    optimized_items = apply_cut_count(optimized_items, int(cut_count))
+                    total_qty = sum(item["qty"] for item in optimized_items)
+
+                    if not optimized_items:
+                        st.error("선택된 재단 품목이 없습니다.")
+                    elif total_qty > 3000:
+                        st.error("총 재단 수량이 너무 많습니다. 수량을 줄여주세요.")
+                    else:
+                        result = optimize_parts(optimized_items, float(board_width), float(board_height), float(kerf), float(margin), rotate_allowed, mix_same_color_thickness)
+                        result["kerf_mm"] = float(kerf)
+                        result["board_batch"] = int(board_batch)
+                        result["cut_count"] = int(cut_count)
+                        result["runs_required"] = math.ceil(result["used_boards"] / max(1, int(board_batch)))
+                        result["total_selected_qty"] = total_qty
+                        st.session_state["opt_result"] = result
+                        analysis_df, analysis_summary = analyze_alternatives(optimized_items, float(board_width), float(board_height), float(kerf), float(margin), rotate_allowed, mix_same_color_thickness)
+                        st.session_state["analysis_df"] = analysis_df
+                        st.session_state["analysis_summary"] = analysis_summary
+                except Exception as exc:
+                    st.error(f"최적화 중 오류: {exc}")
+                    st.code(traceback.format_exc())
+
             opt_result = st.session_state.get("opt_result")
-            if opt_result and opt_result["sheets"]:
-                labels = [f"Sheet {s['sheet_no']} | {s.get('group_name', '')}" for s in opt_result["sheets"]]
-                selected_sheet_label = st.selectbox("시트 선택", labels)
-                selected_sheet_no = int(selected_sheet_label.split("|")[0].replace("Sheet", "").strip())
-                selected_sheet = next(s for s in opt_result["sheets"] if s["sheet_no"] == selected_sheet_no)
-                components.html(make_svg(selected_sheet, opt_result["board_width_mm"], opt_result["board_height_mm"], opt_result.get("kerf_mm", 0.0)), height=700, scrolling=True)
+            if opt_result:
+                st.subheader("최적화 결과")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("사용 원장 수", opt_result["used_boards"])
+                m2.metric("수율", f"{opt_result['yield_rate']}%")
+                m3.metric("자투리 면적", f"{opt_result['waste_area']:,}")
+                m4.metric("미배치 수", opt_result["unplaced_count"])
+
+                z1, z2, z3, z4 = st.columns(4)
+                z1.metric("총 재단 수량 합계", opt_result.get("total_selected_qty", 0))
+                z2.metric("한 번에 재단할 원장 매수", opt_result.get("board_batch", 1))
+                z3.metric("재단 매수", opt_result.get("cut_count", 1))
+                z4.metric("예상 재단 횟수", opt_result.get("runs_required", 1))
+
+                if opt_result["sheets"]:
+                    labels = [f"Sheet {s['sheet_no']} | {s.get('group_name', '')}" for s in opt_result["sheets"]]
+                    selected_sheet_label = st.selectbox("시트 선택", labels)
+                    selected_sheet_no = int(selected_sheet_label.split("|")[0].replace("Sheet", "").strip())
+                    selected_sheet = next(s for s in opt_result["sheets"] if s["sheet_no"] == selected_sheet_no)
+                    st.caption("빨간색은 톱날폭(kerf) 영역입니다.")
+                    st.write(f"그룹: {selected_sheet.get('group_name', '-')}")
+                    components.html(make_svg(selected_sheet, opt_result["board_width_mm"], opt_result["board_height_mm"], opt_result.get("kerf_mm", 0.0)), height=700, scrolling=True)
+                    st.dataframe(pd.DataFrame(selected_sheet["placements"]), use_container_width=True, height=260)
+
+                analysis_df = st.session_state.get("analysis_df")
+                analysis_summary = st.session_state.get("analysis_summary", "")
+                if analysis_df is not None:
+                    st.subheader("수율 개선 분석")
+                    if analysis_summary:
+                        st.info(analysis_summary)
+                    st.dataframe(analysis_df, use_container_width=True)
+    else:
+        st.info("제품코드를 입력하거나 선택하세요.")
 else:
     st.info("BOM 엑셀 파일을 업로드하면 제품 조회와 최적화를 사용할 수 있습니다.")
