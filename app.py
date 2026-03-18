@@ -7,13 +7,14 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="목재 재단 프로그램 Fast v9", layout="wide")
+st.set_page_config(page_title="목재 재단 프로그램 Fast v10", layout="wide")
 
 BOARD_PRESETS = {
     "기본 4x8 (1220 x 2440)": (2440.0, 1220.0),
     "4x6 (1220 x 1830)": (1830.0, 1220.0),
     "맞춤 입력": None,
 }
+
 
 def parse_spec(spec_raw: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     if spec_raw is None or (isinstance(spec_raw, float) and math.isnan(spec_raw)):
@@ -24,6 +25,7 @@ def parse_spec(spec_raw: Any) -> Tuple[Optional[float], Optional[float], Optiona
         return None, None, None
     return float(m.group(1)), float(m.group(2)), float(m.group(3))
 
+
 def to_int(v: Any, default=0) -> int:
     try:
         if pd.isna(v):
@@ -32,23 +34,116 @@ def to_int(v: Any, default=0) -> int:
     except Exception:
         return default
 
-def to_float(v: Any, default=0.0) -> float:
+
+def normalize_text(v: Any) -> str:
+    if v is None:
+        return ""
     try:
         if pd.isna(v):
-            return default
-        return float(v)
+            return ""
     except Exception:
-        return default
+        pass
+    return str(v).strip()
+
+
+def detect_date_header_row(df: pd.DataFrame) -> Optional[int]:
+    max_rows = min(len(df), 12)
+    max_cols = min(len(df.columns), 20)
+    best_row = None
+    best_score = 0
+    for r in range(max_rows):
+        score = 0
+        for c in range(max_cols):
+            val = df.iat[r, c]
+            try:
+                ts = pd.to_datetime(val, errors="coerce")
+                if not pd.isna(ts):
+                    score += 1
+            except Exception:
+                pass
+        if score > best_score:
+            best_score = score
+            best_row = r
+    return best_row if best_score >= 2 else None
+
+
+def detect_product_col(df: pd.DataFrame) -> int:
+    candidates = [0, 1, 2, 3]
+    best_col = 0
+    best_score = -1
+    sample_rows = min(len(df), 30)
+    for c in candidates:
+        if c >= len(df.columns):
+            continue
+        score = 0
+        for r in range(sample_rows):
+            val = normalize_text(df.iat[r, c]).upper()
+            if re.match(r"^[A-Z0-9\-]{5,}$", val):
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_col = c
+    return best_col
+
+
+def parse_plan_workbook(file) -> pd.DataFrame:
+    xls = pd.ExcelFile(file)
+    rows = []
+    for sheet in xls.sheet_names:
+        raw = pd.read_excel(file, sheet_name=sheet, header=None)
+        if raw.empty:
+            continue
+
+        date_header_row = detect_date_header_row(raw)
+        if date_header_row is None:
+            continue
+
+        product_col = detect_product_col(raw.iloc[date_header_row + 1 :].reset_index(drop=True))
+        # search date cols from full width
+        date_cols = []
+        for c in range(len(raw.columns)):
+            ts = pd.to_datetime(raw.iat[date_header_row, c], errors="coerce")
+            if not pd.isna(ts):
+                date_cols.append((c, ts.date()))
+
+        if not date_cols:
+            continue
+
+        color_col = product_col + 2 if product_col + 2 < len(raw.columns) else None
+
+        current_product = ""
+        for r in range(date_header_row + 1, len(raw)):
+            product_cell = normalize_text(raw.iat[r, product_col]) if product_col < len(raw.columns) else ""
+            if product_cell:
+                current_product = product_cell
+            if not current_product:
+                continue
+
+            color = normalize_text(raw.iat[r, color_col]) if color_col is not None else ""
+            for c, d in date_cols:
+                qty = to_int(raw.iat[r, c], 0)
+                if qty <= 0:
+                    continue
+                rows.append({
+                    "sheet": str(sheet),
+                    "date": str(d),
+                    "product_code": current_product,
+                    "color": color,
+                    "plan_qty": qty,
+                })
+    return pd.DataFrame(rows)
+
 
 def is_cutting_target(row: Dict[str, Any], w, h, t) -> bool:
-    material = str(row.get("재질") or "").upper()
-    image_flag = str(row.get("대표이미지") or "").upper()
+    material = normalize_text(row.get("재질")).upper()
+    image_flag = normalize_text(row.get("대표이미지")).upper()
     qty = to_int(row.get("정소요량"), 0) or to_int(row.get("실소요량"), 0)
     if w is None or h is None or t is None or qty <= 0 or image_flag == "Y":
         return False
     if any(x in material for x in ["BOX", "포장", "철물", "경첩"]):
         return False
     return True
+
 
 def load_bom(df: pd.DataFrame):
     df = df.copy()
@@ -58,24 +153,24 @@ def load_bom(df: pd.DataFrame):
     for idx, row in df.iterrows():
         raw = row.to_dict()
         w, h, t = parse_spec(raw.get("규격"))
-        product_code = str(raw.get("품목코드") or "").strip()
-        part_code = str(raw.get("부품코드") or "").strip()
+        product_code = normalize_text(raw.get("품목코드"))
+        part_code = normalize_text(raw.get("부품코드"))
         bom_qty = to_int(raw.get("정소요량"), 0) or to_int(raw.get("실소요량"), 0)
         item = {
             "selected": True,
             "row_no": int(idx) + 2,
             "product_code": product_code,
             "part_code": part_code,
-            "part_name": str(raw.get("품목명") or "").strip(),
-            "color": str(raw.get("색상") or "").strip(),
+            "part_name": normalize_text(raw.get("품목명")),
+            "color": normalize_text(raw.get("색상")),
             "bom_qty": max(1, bom_qty),
             "actual_cut_qty": 1,
             "qty": max(1, bom_qty),
-            "spec_raw": str(raw.get("규격") or "").strip(),
+            "spec_raw": normalize_text(raw.get("규격")),
             "width_mm": w,
             "height_mm": h,
             "thickness_mm": t,
-            "material_name": str(raw.get("재질") or "").strip(),
+            "material_name": normalize_text(raw.get("재질")),
             "is_cutting_target": is_cutting_target(raw, w, h, t),
         }
         if not product_code:
@@ -85,49 +180,12 @@ def load_bom(df: pd.DataFrame):
         items.append(item)
     return pd.DataFrame(items), pd.DataFrame(errors)
 
-def parse_plan_workbook(file) -> pd.DataFrame:
-    xls = pd.ExcelFile(file)
-    rows = []
-    for sheet in xls.sheet_names:
-        if "주차" not in str(sheet):
-            continue
-        raw = pd.read_excel(file, sheet_name=sheet, header=None)
-        if raw.shape[0] < 4 or raw.shape[1] < 8:
-            continue
-        header_row = 2
-        current_product = None
-        for r in range(3, raw.shape[0]):
-            product = raw.iat[r,0]
-            color = raw.iat[r,2] if raw.shape[1] > 2 else None
-            if pd.notna(product) and str(product).strip():
-                current_product = str(product).strip()
-            if not current_product:
-                continue
-            for c in range(7, min(raw.shape[1], 13)):
-                date_val = raw.iat[header_row, c]
-                qty = raw.iat[r, c]
-                if pd.isna(date_val) or pd.isna(qty):
-                    continue
-                q = to_int(qty, 0)
-                if q <= 0:
-                    continue
-                try:
-                    d = pd.to_datetime(date_val).date()
-                except Exception:
-                    continue
-                rows.append({
-                    "sheet": str(sheet),
-                    "date": str(d),
-                    "product_code": current_product,
-                    "color": "" if pd.isna(color) else str(color).strip(),
-                    "plan_qty": q,
-                })
-    return pd.DataFrame(rows)
 
 def expand_parts(parts):
     expanded = []
     for p in parts:
-        for _ in range(max(1, to_int(p.get("qty"), 1))):
+        repeat = max(1, to_int(p.get("qty"), 1))
+        for _ in range(repeat):
             expanded.append({
                 "product_code": p["product_code"],
                 "part_code": p["part_code"],
@@ -139,6 +197,7 @@ def expand_parts(parts):
             })
     expanded.sort(key=lambda x: x["width_mm"] * x["height_mm"], reverse=True)
     return expanded
+
 
 def prune_rects(rects):
     kept = []
@@ -154,6 +213,7 @@ def prune_rects(rects):
             kept.append(r)
     return kept
 
+
 def split_rect(rect, placed_w, placed_h, kerf):
     right_w = rect["w"] - placed_w - kerf
     bottom_h = rect["h"] - placed_h - kerf
@@ -163,6 +223,7 @@ def split_rect(rect, placed_w, placed_h, kerf):
     if bottom_h > 0:
         out.append({"x": rect["x"], "y": rect["y"] + placed_h + kerf, "w": rect["w"], "h": bottom_h})
     return prune_rects(out)
+
 
 def try_place_part(free_rects, part, rotate_allowed):
     variants = [(part["width_mm"], part["height_mm"], False)]
@@ -177,11 +238,10 @@ def try_place_part(free_rects, part, rotate_allowed):
                     best = {"score": score, "rect_index": idx, "w": w, "h": h, "rotated": rotated}
     return best
 
+
 def optimize_parts(parts, board_width, board_height, kerf, margin, rotate_allowed, mix_same_color_thickness):
     usable_w = board_width - margin * 2
     usable_h = board_height - margin * 2
-    if usable_w <= 0 or usable_h <= 0:
-        raise ValueError("원장 크기보다 여유치가 큽니다.")
     groups = {}
     for p in parts:
         key = (p["color"], float(p["thickness_mm"])) if mix_same_color_thickness else (p["product_code"], p["color"], float(p["thickness_mm"]))
@@ -199,24 +259,32 @@ def optimize_parts(parts, board_width, board_height, kerf, margin, rotate_allowe
                     continue
                 rect = sheet["free_rects"].pop(best["rect_index"])
                 sheet["placements"].append({
-                    "x_mm": round(rect["x"] + margin, 1), "y_mm": round(rect["y"] + margin, 1),
-                    "width_mm": round(best["w"], 1), "height_mm": round(best["h"], 1),
-                    "part_code": part["part_code"], "product_code": part["product_code"], "color": part["color"]
+                    "x_mm": round(rect["x"] + margin, 1),
+                    "y_mm": round(rect["y"] + margin, 1),
+                    "width_mm": round(best["w"], 1),
+                    "height_mm": round(best["h"], 1),
+                    "part_code": part["part_code"],
+                    "product_code": part["product_code"],
+                    "color": part["color"],
                 })
                 sheet["free_rects"].extend(split_rect(rect, best["w"], best["h"], kerf))
                 sheet["free_rects"] = prune_rects(sheet["free_rects"])
                 placed = True
                 break
             if not placed:
-                sheet = {"sheet_no": len(sheets)+1, "group_name": group_name, "placements": [], "free_rects": [{"x":0.0,"y":0.0,"w":usable_w,"h":usable_h}]}
+                sheet = {"sheet_no": len(sheets)+1, "group_name": group_name, "placements": [], "free_rects": [{"x":0.0, "y":0.0, "w": usable_w, "h": usable_h}]}
                 best = try_place_part(sheet["free_rects"], part, rotate_allowed)
                 if best is None:
                     continue
                 rect = sheet["free_rects"].pop(best["rect_index"])
                 sheet["placements"].append({
-                    "x_mm": round(rect["x"] + margin, 1), "y_mm": round(rect["y"] + margin, 1),
-                    "width_mm": round(best["w"], 1), "height_mm": round(best["h"], 1),
-                    "part_code": part["part_code"], "product_code": part["product_code"], "color": part["color"]
+                    "x_mm": round(rect["x"] + margin, 1),
+                    "y_mm": round(rect["y"] + margin, 1),
+                    "width_mm": round(best["w"], 1),
+                    "height_mm": round(best["h"], 1),
+                    "part_code": part["part_code"],
+                    "product_code": part["product_code"],
+                    "color": part["color"],
                 })
                 sheet["free_rects"].extend(split_rect(rect, best["w"], best["h"], kerf))
                 sheet["free_rects"] = prune_rects(sheet["free_rects"])
@@ -229,8 +297,15 @@ def optimize_parts(parts, board_width, board_height, kerf, margin, rotate_allowe
     yield_rate = round((total_area / (used * board_area)) * 100, 2) if used else 0.0
     return {"board_width_mm": board_width, "board_height_mm": board_height, "used_boards": used, "yield_rate": yield_rate, "waste_area": max(0.0, used*board_area-total_area), "sheets": all_sheets}
 
+
 def analyze_alternatives(parts, bw, bh, kerf, margin, rotate_allowed, mix_same_color_thickness):
-    scenarios = [("현재 조건", bw, bh, margin), ("여유치 5.0", bw, bh, 5.0), ("여유치 8.0", bw, bh, 8.0), ("여유치 10.0", bw, bh, 10.0), ("원장 4x6 / 여유치 10.0", 1830.0, 1220.0, 10.0)]
+    scenarios = [
+        ("현재 조건", bw, bh, margin),
+        ("여유치 5.0", bw, bh, 5.0),
+        ("여유치 8.0", bw, bh, 8.0),
+        ("여유치 10.0", bw, bh, 10.0),
+        ("원장 4x6 / 여유치 10.0", 1830.0, 1220.0, 10.0),
+    ]
     rows = []
     for name, sw, sh, sm in scenarios:
         r = optimize_parts(parts, sw, sh, kerf, sm, rotate_allowed, mix_same_color_thickness)
@@ -239,6 +314,7 @@ def analyze_alternatives(parts, bw, bh, kerf, margin, rotate_allowed, mix_same_c
     best = df.sort_values(["수율(%)", "사용 원장 수"], ascending=[False, True]).iloc[0]
     summary = f"분석 결과, '{best['시나리오']}' 조건이 가장 높은 수율을 보였습니다. 예상 수율은 {best['수율(%)']}%이며, 사용 원장 수는 {int(best['사용 원장 수'])}장입니다."
     return df, summary
+
 
 def make_svg(sheet, board_width_mm, board_height_mm):
     scale = min(900 / board_width_mm, 600 / board_height_mm)
@@ -252,8 +328,9 @@ def make_svg(sheet, board_width_mm, board_height_mm):
         parts_svg.append(f'<g><rect x="{x}" y="{y}" width="{w}" height="{h}" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.2"></rect><text x="{x+4}" y="{y+16}" font-size="12" fill="#111">{label}</text></g>')
     return f'<div style="overflow:auto; border:1px solid #ddd; padding:12px; background:#fff;"><svg width="{svg_width}" height="{svg_height}" xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="{svg_width}" height="{svg_height}" fill="white" stroke="#333" stroke-width="2"></rect>{"".join(parts_svg)}</svg></div>'
 
-st.title("목재 재단 프로그램 Fast v9")
-st.caption("BOM 전체 표시 + 월생산계획 자동 재단")
+
+st.title("목재 재단 프로그램 Fast v10")
+st.caption("월생산계획 해석 정확도 개선 + 날짜별 추가 재단")
 
 bom_file = st.file_uploader("BOM 엑셀 업로드", type=["xlsx", "xls"], key="bom")
 plan_file = st.file_uploader("월생산계획 업로드", type=["xlsx", "xls"], key="plan")
@@ -264,14 +341,17 @@ if bom_file is not None:
     bom_df, bom_errors = load_bom(raw_bom)
     st.success(f"BOM 업로드 완료: {len(bom_df)}행")
     with st.expander("BOM 전체 데이터 보기", expanded=True):
-        st.dataframe(bom_df, use_container_width=True, height=500)
+        st.dataframe(bom_df, use_container_width=True, height=520)
 
 if bom_df is not None and plan_file is not None:
     plan_df = parse_plan_workbook(plan_file)
     if plan_df.empty:
-        st.warning("월생산계획 파일에서 날짜별 생산계획을 찾지 못했습니다. 주차 시트를 확인해 주세요.")
+        st.warning("월생산계획 파일 해석 결과가 없습니다. 시트 구조를 확인해 주세요.")
     else:
         st.success(f"월생산계획 해석 완료: {len(plan_df)}건")
+        with st.expander("월생산계획 해석 결과 보기", expanded=False):
+            st.dataframe(plan_df, use_container_width=True, height=240)
+
         board_preset = st.selectbox("원장 규격 선택", list(BOARD_PRESETS.keys()), index=0)
         bw, bh = (2440.0, 1220.0) if BOARD_PRESETS[board_preset] is None else BOARD_PRESETS[board_preset]
         c1, c2, c3 = st.columns(3)
@@ -280,12 +360,35 @@ if bom_df is not None and plan_file is not None:
         rotate_allowed = c3.checkbox("회전 허용", value=True)
         mix_same = st.checkbox("같은 색상 + 같은 두께 혼합 재단", value=True)
 
+        st.subheader("날짜별 추가 재단 입력")
+        unique_dates = sorted(plan_df["date"].dropna().unique().tolist())
+        add_date = st.selectbox("추가 재단 날짜", unique_dates)
+        add_product = st.text_input("추가 재단 제품코드")
+        add_qty = st.number_input("추가 재단 수량", min_value=1, value=1, step=1)
+        if "extra_plan_rows" not in st.session_state:
+            st.session_state["extra_plan_rows"] = []
+        if st.button("추가 재단 품목 등록"):
+            if add_product.strip():
+                st.session_state["extra_plan_rows"].append({
+                    "sheet": "MANUAL",
+                    "date": add_date,
+                    "product_code": add_product.strip(),
+                    "color": "",
+                    "plan_qty": int(add_qty),
+                })
+                st.success("추가 재단 품목이 등록되었습니다.")
+        extra_df = pd.DataFrame(st.session_state["extra_plan_rows"])
+        if not extra_df.empty:
+            st.dataframe(extra_df, use_container_width=True, height=160)
+            plan_df = pd.concat([plan_df, extra_df], ignore_index=True)
+
         daily_rows = []
         detail_results = {}
+
         for d, g in plan_df.groupby("date"):
             parts = []
             for _, row in g.iterrows():
-                product_code = str(row["product_code"]).strip()
+                product_code = normalize_text(row["product_code"])
                 plan_qty = to_int(row["plan_qty"], 0)
                 matched = bom_df[(bom_df["product_code"] == product_code) & (bom_df["is_cutting_target"] == True)].copy()
                 if matched.empty:
@@ -293,11 +396,15 @@ if bom_df is not None and plan_file is not None:
                 matched["actual_cut_qty"] = plan_qty
                 matched["qty"] = matched["bom_qty"].astype(int) * plan_qty
                 parts.extend(matched.to_dict("records"))
+
             if not parts:
                 continue
+
             result = optimize_parts(parts, bw, bh, float(kerf), float(margin), rotate_allowed, mix_same)
             detail_results[d] = result
-            for grp, gg in pd.DataFrame(parts).groupby(["color", "thickness_mm"]):
+
+            part_df = pd.DataFrame(parts)
+            for grp, gg in part_df.groupby(["color", "thickness_mm"], dropna=False):
                 sub = optimize_parts(gg.to_dict("records"), bw, bh, float(kerf), float(margin), rotate_allowed, True)
                 daily_rows.append({
                     "date": d,
@@ -314,10 +421,18 @@ if bom_df is not None and plan_file is not None:
         st.dataframe(daily_df, use_container_width=True, height=420)
 
         if not daily_df.empty:
-            analysis_df, summary = analyze_alternatives(
-                [r for _, r in bom_df[bom_df["is_cutting_target"] == True].head(200).iterrows()],
-                bw, bh, float(kerf), float(margin), rotate_allowed, mix_same
-            )
+            all_parts = []
+            for d, g in plan_df.groupby("date"):
+                for _, row in g.iterrows():
+                    product_code = normalize_text(row["product_code"])
+                    plan_qty = to_int(row["plan_qty"], 0)
+                    matched = bom_df[(bom_df["product_code"] == product_code) & (bom_df["is_cutting_target"] == True)].copy()
+                    if matched.empty:
+                        continue
+                    matched["actual_cut_qty"] = plan_qty
+                    matched["qty"] = matched["bom_qty"].astype(int) * plan_qty
+                    all_parts.extend(matched.to_dict("records"))
+            analysis_df, summary = analyze_alternatives(all_parts, bw, bh, float(kerf), float(margin), rotate_allowed, mix_same)
             st.subheader("재단 수율 개선 분석")
             st.info(summary)
             st.dataframe(analysis_df, use_container_width=True, height=220)
