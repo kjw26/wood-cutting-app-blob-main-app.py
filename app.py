@@ -48,19 +48,16 @@ def normalize_text(v: Any) -> str:
 
 def detect_date_header_row(df: pd.DataFrame) -> Optional[int]:
     max_rows = min(len(df), 12)
-    max_cols = min(len(df.columns), 20)
+    max_cols = min(len(df.columns), 24)
     best_row = None
     best_score = 0
     for r in range(max_rows):
         score = 0
         for c in range(max_cols):
             val = df.iat[r, c]
-            try:
-                ts = pd.to_datetime(val, errors="coerce")
-                if not pd.isna(ts):
-                    score += 1
-            except Exception:
-                pass
+            ts = pd.to_datetime(val, errors="coerce")
+            if not pd.isna(ts):
+                score += 1
         if score > best_score:
             best_score = score
             best_row = r
@@ -68,10 +65,10 @@ def detect_date_header_row(df: pd.DataFrame) -> Optional[int]:
 
 
 def detect_product_col(df: pd.DataFrame) -> int:
-    candidates = [0, 1, 2, 3]
+    candidates = [0, 1, 2, 3, 4]
     best_col = 0
     best_score = -1
-    sample_rows = min(len(df), 30)
+    sample_rows = min(len(df), 40)
     for c in candidates:
         if c >= len(df.columns):
             continue
@@ -99,19 +96,17 @@ def parse_plan_workbook(file) -> pd.DataFrame:
             continue
 
         product_col = detect_product_col(raw.iloc[date_header_row + 1 :].reset_index(drop=True))
-        # search date cols from full width
         date_cols = []
         for c in range(len(raw.columns)):
             ts = pd.to_datetime(raw.iat[date_header_row, c], errors="coerce")
             if not pd.isna(ts):
                 date_cols.append((c, ts.date()))
-
         if not date_cols:
             continue
 
         color_col = product_col + 2 if product_col + 2 < len(raw.columns) else None
-
         current_product = ""
+
         for r in range(date_header_row + 1, len(raw)):
             product_cell = normalize_text(raw.iat[r, product_col]) if product_col < len(raw.columns) else ""
             if product_cell:
@@ -131,7 +126,12 @@ def parse_plan_workbook(file) -> pd.DataFrame:
                     "color": color,
                     "plan_qty": qty,
                 })
-    return pd.DataFrame(rows)
+
+    plan_df = pd.DataFrame(rows)
+    expected_cols = ["sheet", "date", "product_code", "color", "plan_qty"]
+    if plan_df.empty:
+        return pd.DataFrame(columns=expected_cols)
+    return plan_df[expected_cols]
 
 
 def is_cutting_target(row: Dict[str, Any], w, h, t) -> bool:
@@ -377,6 +377,7 @@ if bom_df is not None and plan_file is not None:
                     "plan_qty": int(add_qty),
                 })
                 st.success("추가 재단 품목이 등록되었습니다.")
+
         extra_df = pd.DataFrame(st.session_state["extra_plan_rows"])
         if not extra_df.empty:
             st.dataframe(extra_df, use_container_width=True, height=160)
@@ -416,11 +417,14 @@ if bom_df is not None and plan_file is not None:
                     "자투리 면적": sub["waste_area"],
                 })
 
-        daily_df = pd.DataFrame(daily_rows).sort_values(["date", "thickness_mm", "color"])
-        st.subheader("날짜별 / 두께별 / 색상별 재단 계획")
-        st.dataframe(daily_df, use_container_width=True, height=420)
+        daily_df = pd.DataFrame(daily_rows)
+        if daily_df.empty:
+            st.warning("날짜별 재단 계획 결과가 없습니다.")
+        else:
+            daily_df = daily_df.sort_values(["date", "thickness_mm", "color"])
+            st.subheader("날짜별 / 두께별 / 색상별 재단 계획")
+            st.dataframe(daily_df, use_container_width=True, height=420)
 
-        if not daily_df.empty:
             all_parts = []
             for d, g in plan_df.groupby("date"):
                 for _, row in g.iterrows():
@@ -432,6 +436,7 @@ if bom_df is not None and plan_file is not None:
                     matched["actual_cut_qty"] = plan_qty
                     matched["qty"] = matched["bom_qty"].astype(int) * plan_qty
                     all_parts.extend(matched.to_dict("records"))
+
             analysis_df, summary = analyze_alternatives(all_parts, bw, bh, float(kerf), float(margin), rotate_allowed, mix_same)
             st.subheader("재단 수율 개선 분석")
             st.info(summary)
