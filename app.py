@@ -2,26 +2,23 @@
 import io
 import re
 import traceback
-from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="목재 재단 프로그램 Fast v16", layout="wide")
-
 DEFAULT_BOM_URL = "https://raw.githubusercontent.com/kjw26/wood-cutting-app-blob-main-app.py/main/BOM_DATA.xlsx"
-
 BOARD_PRESETS = {
     "기본 4x8 (1220 x 2440)": (2440.0, 1220.0),
     "4x6 (1220 x 1830)": (1830.0, 1220.0),
     "맞춤 입력": None,
 }
-RESULT_COLS = ["date", "color", "thickness_mm", "총 재단 수량", "사용 원장 수", "수율(%)", "자투리 면적"]
+
+st.set_page_config(page_title="목재 재단 프로그램 Fast v17", layout="wide")
 
 
-def normalize_text(v: Any) -> str:
+def normalize_text(v):
     if v is None:
         return ""
     try:
@@ -32,7 +29,7 @@ def normalize_text(v: Any) -> str:
     return str(v).strip()
 
 
-def to_int(v: Any, default=0) -> int:
+def to_int(v, default=0):
     try:
         if pd.isna(v):
             return default
@@ -41,7 +38,7 @@ def to_int(v: Any, default=0) -> int:
         return default
 
 
-def parse_spec(spec_raw: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+def parse_spec(spec_raw):
     text = normalize_text(spec_raw)
     if not text:
         return None, None, None
@@ -52,8 +49,11 @@ def parse_spec(spec_raw: Any) -> Tuple[Optional[float], Optional[float], Optiona
 
 
 def parse_date_like(val):
-    if isinstance(val, pd.Timestamp) and not pd.isna(val):
-        return val
+    try:
+        if isinstance(val, pd.Timestamp) and not pd.isna(val):
+            return val
+    except Exception:
+        pass
     text = normalize_text(val)
     if not text:
         return None
@@ -61,8 +61,7 @@ def parse_date_like(val):
     cleaned = cleaned.replace(".", "/").replace("-", "/")
     cleaned = re.sub(r"[가-힣A-Za-z]", "", cleaned)
     cleaned = re.sub(r"\s+", "", cleaned).strip()
-    candidates = [cleaned, text]
-    for cand in candidates:
+    for cand in [cleaned, text]:
         if not cand:
             continue
         if re.match(r"^\d{2}/\d{2}$", cand):
@@ -70,13 +69,10 @@ def parse_date_like(val):
         ts = pd.to_datetime(cand, errors="coerce")
         if not pd.isna(ts):
             return ts
-    ts = pd.to_datetime(val, errors="coerce")
-    if not pd.isna(ts):
-        return ts
     return None
 
 
-def is_cutting_target(row: Dict[str, Any], w, h, t) -> bool:
+def is_cutting_target(row, w, h, t):
     material = normalize_text(row.get("재질")).upper()
     image_flag = normalize_text(row.get("대표이미지")).upper()
     qty = to_int(row.get("정소요량"), 0) or to_int(row.get("실소요량"), 0)
@@ -89,22 +85,19 @@ def is_cutting_target(row: Dict[str, Any], w, h, t) -> bool:
     return True
 
 
-def load_bom(df: pd.DataFrame):
+def load_bom(df):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     df = df.fillna("")
-    items, errors = [], []
+    rows = []
     for idx, row in df.iterrows():
         raw = row.to_dict()
         w, h, t = parse_spec(raw.get("규격"))
-        product_code = normalize_text(raw.get("품목코드"))
-        part_code = normalize_text(raw.get("부품코드"))
         bom_qty = to_int(raw.get("정소요량"), 0) or to_int(raw.get("실소요량"), 0)
-        items.append({
-            "selected": True,
+        rows.append({
             "row_no": int(idx) + 2,
-            "product_code": product_code,
-            "part_code": part_code,
+            "product_code": normalize_text(raw.get("품목코드")),
+            "part_code": normalize_text(raw.get("부품코드")),
             "part_name": normalize_text(raw.get("품목명")),
             "color": normalize_text(raw.get("색상")),
             "bom_qty": max(1, bom_qty),
@@ -117,15 +110,10 @@ def load_bom(df: pd.DataFrame):
             "material_name": normalize_text(raw.get("재질")),
             "is_cutting_target": is_cutting_target(raw, w, h, t),
         })
-        if not product_code:
-            errors.append({"row": int(idx)+2, "field": "품목코드", "message": "제품코드 누락"})
-        if not part_code:
-            errors.append({"row": int(idx)+2, "field": "부품코드", "message": "부품코드 누락"})
-    err_df = pd.DataFrame(errors) if errors else pd.DataFrame(columns=["row", "field", "message"])
-    return pd.DataFrame(items), err_df
+    return pd.DataFrame(rows)
 
 
-def read_bom_from_source(uploaded_file, url_text):
+def read_bom(uploaded_file, url_text):
     if uploaded_file is not None:
         return pd.read_excel(uploaded_file)
     url = normalize_text(url_text) or DEFAULT_BOM_URL
@@ -134,9 +122,9 @@ def read_bom_from_source(uploaded_file, url_text):
     return pd.read_excel(io.BytesIO(resp.content))
 
 
-def find_header_layout(raw: pd.DataFrame):
-    rows = min(len(raw), 40)
-    cols = min(len(raw.columns), 50)
+def find_header_layout(raw):
+    rows = min(len(raw), 45)
+    cols = min(len(raw.columns), 55)
     for r in range(rows):
         row_text = [normalize_text(raw.iat[r, c]).replace(" ", "") for c in range(cols)]
         product_candidates = [i for i, v in enumerate(row_text) if "품목코드" in v]
@@ -144,15 +132,10 @@ def find_header_layout(raw: pd.DataFrame):
             continue
         product_col = product_candidates[0]
         color_candidates = [i for i, v in enumerate(row_text) if "색상" in v]
-        color_col = None
-        if color_candidates:
-            after = [c for c in color_candidates if c > product_col]
-            color_col = after[0] if after else color_candidates[0]
-        else:
-            color_col = min(product_col + 1, cols - 1)
+        color_col = color_candidates[0] if color_candidates else min(product_col + 1, cols - 1)
 
         date_cols = []
-        for rr in [r, min(r + 1, len(raw) - 1)]:
+        for rr in [r, min(r + 1, len(raw) - 1), min(r + 2, len(raw) - 1)]:
             local = []
             for c in range(cols):
                 ts = parse_date_like(raw.iat[rr, c])
@@ -193,7 +176,7 @@ def parse_plan_workbook_auto(file):
             current_product = ""
             added = 0
             for r in range(layout["data_start_row"], len(raw)):
-                product_cell = normalize_text(raw.iat[r, layout["product_col"]])
+                product_cell = normalize_text(raw.iat[r, layout["product_col"]]) if layout["product_col"] < len(raw.columns) else ""
                 if product_cell:
                     current_product = product_cell
                 if not current_product:
@@ -203,6 +186,8 @@ def parse_plan_workbook_auto(file):
 
                 color = normalize_text(raw.iat[r, layout["color_col"]]) if layout["color_col"] < len(raw.columns) else ""
                 for c, d in layout["date_cols"]:
+                    if c >= len(raw.columns):
+                        continue
                     qty = to_int(raw.iat[r, c], 0)
                     if qty > 0:
                         all_rows.append({
@@ -231,6 +216,7 @@ def parse_plan_workbook_auto(file):
         plan_df = pd.DataFrame(columns=["sheet", "date", "product_code", "color", "plan_qty"])
     else:
         plan_df = plan_df.groupby(["date", "product_code", "color"], as_index=False)["plan_qty"].sum()
+
     log_df = pd.DataFrame(parse_logs) if parse_logs else pd.DataFrame(columns=["sheet", "status", "reason"])
     return plan_df, log_df
 
@@ -238,7 +224,8 @@ def parse_plan_workbook_auto(file):
 def expand_parts(parts):
     expanded = []
     for p in parts:
-        for _ in range(max(1, to_int(p.get("qty"), 1))):
+        qty = max(1, to_int(p.get("qty"), 1))
+        for _ in range(qty):
             expanded.append({
                 "product_code": p["product_code"],
                 "part_code": p["part_code"],
@@ -288,7 +275,7 @@ def try_place_part(free_rects, part, rotate_allowed):
             if w <= rect["w"] + 1e-9 and h <= rect["h"] + 1e-9:
                 score = (rect["w"] * rect["h"] - w * h, min(rect["w"] - w, rect["h"] - h))
                 if best is None or score < best["score"]:
-                    best = {"score": score, "rect_index": idx, "w": w, "h": h, "rotated": rotated}
+                    best = {"score": score, "rect_index": idx, "w": w, "h": h}
     return best
 
 
@@ -402,23 +389,24 @@ def build_workorder_excel(daily_df, analysis_df, workorder_summaries, placement_
 st.title("목재 재단 프로그램 Fast v16")
 st.caption("오류 방지 강화 버전")
 
-st.subheader("BOM 데이터 소스")
-bom_url = st.text_input("BOM URL (기본 고정)", value=DEFAULT_BOM_URL)
-st.caption("기본값은 GitHub raw BOM 주소로 고정되어 있습니다.")
-bom_file = st.file_uploader("또는 BOM 엑셀 업로드", type=["xlsx", "xls"], key="bom")
-plan_file = st.file_uploader("주차별 생산계획 업로드", type=["xlsx", "xls"], key="plan")
-
 try:
+    st.subheader("BOM 데이터 소스")
+    bom_url = st.text_input("BOM URL (기본 고정)", value=DEFAULT_BOM_URL)
+    st.caption("기본값은 GitHub raw BOM 주소로 고정되어 있습니다.")
+    bom_file = st.file_uploader("또는 BOM 엑셀 업로드", type=["xlsx", "xls"], key="bom")
+    plan_file = st.file_uploader("주차별 생산계획 업로드", type=["xlsx", "xls"], key="plan")
+
     bom_df = None
-    raw_bom = read_bom_from_source(bom_file, bom_url) if (bom_file is not None or normalize_text(bom_url)) else None
-    if raw_bom is not None:
-        bom_df, bom_errors = load_bom(raw_bom)
+    if bom_file is not None or normalize_text(bom_url):
+        raw_bom = read_bom_from_source(bom_file, bom_url)
+        bom_df = load_bom(raw_bom)[0]
         st.success(f"BOM 로드 완료: {len(bom_df)}행")
         with st.expander("BOM 전체 데이터 보기", expanded=False):
             st.dataframe(bom_df, use_container_width=True, height=420)
 
     if bom_df is not None and plan_file is not None:
         plan_df, parse_log_df = parse_plan_workbook_auto(plan_file)
+
         if plan_df.empty:
             st.warning("주차별 생산계획을 자동 해석하지 못했습니다.")
         else:
@@ -438,8 +426,11 @@ try:
             rotate_allowed = c3.checkbox("회전 허용", value=True)
             mix_same = st.checkbox("같은 색상 + 같은 두께 혼합 재단", value=True)
 
-            daily_rows, analysis_rows = [], []
-            detail_results, workorder_summaries, placement_tables = {}, {}, {}
+            daily_rows = []
+            analysis_rows = []
+            detail_results = {}
+            workorder_summaries = {}
+            placement_tables = {}
 
             for d, g in plan_df.groupby("date"):
                 parts = []
@@ -536,13 +527,7 @@ try:
                 st.dataframe(analysis_df_all, use_container_width=True, height=220)
 
                 workorder_bytes = build_workorder_excel(daily_df, analysis_df_all, workorder_summaries, placement_tables)
-                st.download_button(
-                    "작업지시서 엑셀 다운로드",
-                    data=workorder_bytes,
-                    file_name="wood_cutting_workorders.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+                st.download_button("작업지시서 엑셀 다운로드", data=workorder_bytes, file_name="wood_cutting_workorders.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
                 selected_date = st.selectbox("작업지시서 / 분할도 날짜 선택", sorted(detail_results.keys()))
                 selected_result = detail_results[selected_date]
