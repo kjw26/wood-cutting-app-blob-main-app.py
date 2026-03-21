@@ -14,8 +14,9 @@ BOARD_PRESETS = {
     "4x6 (1220 x 1830)": (1830.0, 1220.0),
     "맞춤 입력": None,
 }
+RESULT_COLS = ["date", "color", "thickness_mm", "총 재단 수량", "사용 원장 수", "수율(%)", "자투리 면적"]
 
-st.set_page_config(page_title="목재 재단 프로그램 Fast v17", layout="wide")
+st.set_page_config(page_title="목재 재단 프로그램 Fast v18", layout="wide")
 
 
 def normalize_text(v):
@@ -89,15 +90,18 @@ def load_bom(df):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     df = df.fillna("")
-    rows = []
+    items = []
+    errors = []
     for idx, row in df.iterrows():
         raw = row.to_dict()
         w, h, t = parse_spec(raw.get("규격"))
+        product_code = normalize_text(raw.get("품목코드"))
+        part_code = normalize_text(raw.get("부품코드"))
         bom_qty = to_int(raw.get("정소요량"), 0) or to_int(raw.get("실소요량"), 0)
-        rows.append({
+        items.append({
             "row_no": int(idx) + 2,
-            "product_code": normalize_text(raw.get("품목코드")),
-            "part_code": normalize_text(raw.get("부품코드")),
+            "product_code": product_code,
+            "part_code": part_code,
             "part_name": normalize_text(raw.get("품목명")),
             "color": normalize_text(raw.get("색상")),
             "bom_qty": max(1, bom_qty),
@@ -110,7 +114,13 @@ def load_bom(df):
             "material_name": normalize_text(raw.get("재질")),
             "is_cutting_target": is_cutting_target(raw, w, h, t),
         })
-    return pd.DataFrame(rows)
+        if not product_code:
+            errors.append({"row": int(idx) + 2, "field": "품목코드", "message": "제품코드 누락"})
+        if not part_code:
+            errors.append({"row": int(idx) + 2, "field": "부품코드", "message": "부품코드 누락"})
+    bom_df = pd.DataFrame(items)
+    err_df = pd.DataFrame(errors) if errors else pd.DataFrame(columns=["row", "field", "message"])
+    return bom_df, err_df
 
 
 def read_bom(uploaded_file, url_text):
@@ -160,14 +170,12 @@ def parse_plan_workbook_auto(file):
     xls = pd.ExcelFile(file)
     all_rows = []
     parse_logs = []
-
     for sheet in xls.sheet_names:
         try:
             raw = pd.read_excel(file, sheet_name=sheet, header=None)
             if raw.empty:
                 parse_logs.append({"sheet": sheet, "status": "skip", "reason": "빈 시트"})
                 continue
-
             layout = find_header_layout(raw)
             if layout is None:
                 parse_logs.append({"sheet": sheet, "status": "skip", "reason": "품목코드/색상/날짜 헤더를 찾지 못함"})
@@ -216,7 +224,6 @@ def parse_plan_workbook_auto(file):
         plan_df = pd.DataFrame(columns=["sheet", "date", "product_code", "color", "plan_qty"])
     else:
         plan_df = plan_df.groupby(["date", "product_code", "color"], as_index=False)["plan_qty"].sum()
-
     log_df = pd.DataFrame(parse_logs) if parse_logs else pd.DataFrame(columns=["sheet", "status", "reason"])
     return plan_df, log_df
 
@@ -386,8 +393,8 @@ def build_workorder_excel(daily_df, analysis_df, workorder_summaries, placement_
     return output.getvalue()
 
 
-st.title("목재 재단 프로그램 Fast v16")
-st.caption("오류 방지 강화 버전")
+st.title("목재 재단 프로그램 Fast v18")
+st.caption("BOM/생산계획 오류 수정본")
 
 try:
     st.subheader("BOM 데이터 소스")
@@ -397,12 +404,18 @@ try:
     plan_file = st.file_uploader("주차별 생산계획 업로드", type=["xlsx", "xls"], key="plan")
 
     bom_df = None
+    bom_errors = pd.DataFrame(columns=["row", "field", "message"])
+
     if bom_file is not None or normalize_text(bom_url):
         raw_bom = read_bom(bom_file, bom_url)
-        bom_df = load_bom(raw_bom)[0]
+        bom_df, bom_errors = load_bom(raw_bom)
+
         st.success(f"BOM 로드 완료: {len(bom_df)}행")
         with st.expander("BOM 전체 데이터 보기", expanded=False):
             st.dataframe(bom_df, use_container_width=True, height=420)
+        if not bom_errors.empty:
+            with st.expander("BOM 검증 오류", expanded=False):
+                st.dataframe(bom_errors, use_container_width=True, height=180)
 
     if bom_df is not None and plan_file is not None:
         plan_df, parse_log_df = parse_plan_workbook_auto(plan_file)
