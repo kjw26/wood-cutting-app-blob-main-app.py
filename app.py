@@ -398,7 +398,7 @@ try:
 
     bom_df = None
     if bom_file is not None or normalize_text(bom_url):
-        raw_bom = read_bom_from_source(bom_file, bom_url)
+        raw_bom = read_bom(bom_file, bom_url)
         bom_df = load_bom(raw_bom)[0]
         st.success(f"BOM 로드 완료: {len(bom_df)}행")
         with st.expander("BOM 전체 데이터 보기", expanded=False):
