@@ -1,38 +1,22 @@
 
+import io
 import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="목재 재단 프로그램 Fast v10", layout="wide")
+st.set_page_config(page_title="목재 재단 프로그램 Fast v11", layout="wide")
 
 BOARD_PRESETS = {
     "기본 4x8 (1220 x 2440)": (2440.0, 1220.0),
     "4x6 (1220 x 1830)": (1830.0, 1220.0),
     "맞춤 입력": None,
 }
-
-
-def parse_spec(spec_raw: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    if spec_raw is None or (isinstance(spec_raw, float) and math.isnan(spec_raw)):
-        return None, None, None
-    text = str(spec_raw).strip()
-    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*[*xX]\s*(\d+(?:\.\d+)?)\s*[*xX]\s*(\d+(?:\.\d+)?)\s*$", text)
-    if not m:
-        return None, None, None
-    return float(m.group(1)), float(m.group(2)), float(m.group(3))
-
-
-def to_int(v: Any, default=0) -> int:
-    try:
-        if pd.isna(v):
-            return default
-        return int(float(v))
-    except Exception:
-        return default
+DAILY_RESULT_COLS = ["date", "color", "thickness_mm", "총 재단 수량", "사용 원장 수", "수율(%)", "자투리 면적"]
 
 
 def normalize_text(v: Any) -> str:
@@ -46,99 +30,32 @@ def normalize_text(v: Any) -> str:
     return str(v).strip()
 
 
-def detect_date_header_row(df: pd.DataFrame) -> Optional[int]:
-    max_rows = min(len(df), 12)
-    max_cols = min(len(df.columns), 24)
-    best_row = None
-    best_score = 0
-    for r in range(max_rows):
-        score = 0
-        for c in range(max_cols):
-            val = df.iat[r, c]
-            ts = pd.to_datetime(val, errors="coerce")
-            if not pd.isna(ts):
-                score += 1
-        if score > best_score:
-            best_score = score
-            best_row = r
-    return best_row if best_score >= 2 else None
+def to_int(v: Any, default=0) -> int:
+    try:
+        if pd.isna(v):
+            return default
+        return int(float(v))
+    except Exception:
+        return default
 
 
-def detect_product_col(df: pd.DataFrame) -> int:
-    candidates = [0, 1, 2, 3, 4]
-    best_col = 0
-    best_score = -1
-    sample_rows = min(len(df), 40)
-    for c in candidates:
-        if c >= len(df.columns):
-            continue
-        score = 0
-        for r in range(sample_rows):
-            val = normalize_text(df.iat[r, c]).upper()
-            if re.match(r"^[A-Z0-9\-]{5,}$", val):
-                score += 1
-        if score > best_score:
-            best_score = score
-            best_col = c
-    return best_col
-
-
-def parse_plan_workbook(file) -> pd.DataFrame:
-    xls = pd.ExcelFile(file)
-    rows = []
-    for sheet in xls.sheet_names:
-        raw = pd.read_excel(file, sheet_name=sheet, header=None)
-        if raw.empty:
-            continue
-
-        date_header_row = detect_date_header_row(raw)
-        if date_header_row is None:
-            continue
-
-        product_col = detect_product_col(raw.iloc[date_header_row + 1 :].reset_index(drop=True))
-        date_cols = []
-        for c in range(len(raw.columns)):
-            ts = pd.to_datetime(raw.iat[date_header_row, c], errors="coerce")
-            if not pd.isna(ts):
-                date_cols.append((c, ts.date()))
-        if not date_cols:
-            continue
-
-        color_col = product_col + 2 if product_col + 2 < len(raw.columns) else None
-        current_product = ""
-
-        for r in range(date_header_row + 1, len(raw)):
-            product_cell = normalize_text(raw.iat[r, product_col]) if product_col < len(raw.columns) else ""
-            if product_cell:
-                current_product = product_cell
-            if not current_product:
-                continue
-
-            color = normalize_text(raw.iat[r, color_col]) if color_col is not None else ""
-            for c, d in date_cols:
-                qty = to_int(raw.iat[r, c], 0)
-                if qty <= 0:
-                    continue
-                rows.append({
-                    "sheet": str(sheet),
-                    "date": str(d),
-                    "product_code": current_product,
-                    "color": color,
-                    "plan_qty": qty,
-                })
-
-    plan_df = pd.DataFrame(rows)
-    expected_cols = ["sheet", "date", "product_code", "color", "plan_qty"]
-    if plan_df.empty:
-        return pd.DataFrame(columns=expected_cols)
-    return plan_df[expected_cols]
+def parse_spec(spec_raw: Any) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    text = normalize_text(spec_raw)
+    if not text:
+        return None, None, None
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*[*xX]\s*(\d+(?:\.\d+)?)\s*[*xX]\s*(\d+(?:\.\d+)?)\s*$", text)
+    if not m:
+        return None, None, None
+    return float(m.group(1)), float(m.group(2)), float(m.group(3))
 
 
 def is_cutting_target(row: Dict[str, Any], w, h, t) -> bool:
     material = normalize_text(row.get("재질")).upper()
     image_flag = normalize_text(row.get("대표이미지")).upper()
     qty = to_int(row.get("정소요량"), 0) or to_int(row.get("실소요량"), 0)
-    if w is None or h is None or t is None or qty <= 0 or image_flag == "Y":
+    if w is None or h is None or t is None:
+        return False
+    if qty <= 0 or image_flag == "Y":
         return False
     if any(x in material for x in ["BOX", "포장", "철물", "경첩"]):
         return False
@@ -177,8 +94,98 @@ def load_bom(df: pd.DataFrame):
             errors.append({"row": int(idx)+2, "field": "품목코드", "message": "제품코드 누락"})
         if not part_code:
             errors.append({"row": int(idx)+2, "field": "부품코드", "message": "부품코드 누락"})
+        if item["spec_raw"] and w is None:
+            errors.append({"row": int(idx)+2, "field": "규격", "message": f"규격 파싱 실패: {item['spec_raw']}"})
         items.append(item)
-    return pd.DataFrame(items), pd.DataFrame(errors)
+    bom_df = pd.DataFrame(items)
+    err_df = pd.DataFrame(errors) if errors else pd.DataFrame(columns=["row", "field", "message"])
+    return bom_df, err_df
+
+
+def read_bom_from_source(uploaded_file, url_text):
+    if uploaded_file is not None:
+        return pd.read_excel(uploaded_file)
+    if normalize_text(url_text):
+        resp = requests.get(url_text.strip(), timeout=20)
+        resp.raise_for_status()
+        return pd.read_excel(io.BytesIO(resp.content))
+    return None
+
+
+def detect_date_header_row(df: pd.DataFrame) -> Optional[int]:
+    max_rows = min(len(df), 12)
+    max_cols = min(len(df.columns), 24)
+    best_row, best_score = None, 0
+    for r in range(max_rows):
+        score = 0
+        for c in range(max_cols):
+            ts = pd.to_datetime(df.iat[r, c], errors="coerce")
+            if not pd.isna(ts):
+                score += 1
+        if score > best_score:
+            best_row, best_score = r, score
+    return best_row if best_score >= 2 else None
+
+
+def detect_product_col(df: pd.DataFrame) -> int:
+    best_col, best_score = 0, -1
+    for c in range(min(6, len(df.columns))):
+        score = 0
+        for r in range(min(40, len(df))):
+            val = normalize_text(df.iat[r, c]).upper()
+            if re.match(r"^[A-Z0-9\-]{5,}$", val):
+                score += 1
+        if score > best_score:
+            best_col, best_score = c, score
+    return best_col
+
+
+def parse_plan_workbook(file) -> pd.DataFrame:
+    xls = pd.ExcelFile(file)
+    rows = []
+    for sheet in xls.sheet_names:
+        raw = pd.read_excel(file, sheet_name=sheet, header=None)
+        if raw.empty:
+            continue
+        hdr = detect_date_header_row(raw)
+        if hdr is None:
+            continue
+        product_col = detect_product_col(raw.iloc[hdr + 1:].reset_index(drop=True))
+        color_col = product_col + 2 if product_col + 2 < len(raw.columns) else None
+
+        date_cols = []
+        for c in range(len(raw.columns)):
+            ts = pd.to_datetime(raw.iat[hdr, c], errors="coerce")
+            if not pd.isna(ts):
+                weekday = ts.weekday()
+                if weekday <= 5:
+                    date_cols.append((c, str(ts.date())))
+        if not date_cols:
+            continue
+
+        current_product = ""
+        for r in range(hdr + 1, len(raw)):
+            cell = normalize_text(raw.iat[r, product_col]) if product_col < len(raw.columns) else ""
+            if cell:
+                current_product = cell
+            if not current_product:
+                continue
+            color = normalize_text(raw.iat[r, color_col]) if color_col is not None and color_col < len(raw.columns) else ""
+            for c, d in date_cols:
+                qty = to_int(raw.iat[r, c], 0)
+                if qty > 0:
+                    rows.append({
+                        "sheet": str(sheet),
+                        "date": d,
+                        "product_code": current_product,
+                        "color": color,
+                        "plan_qty": qty,
+                    })
+    if not rows:
+        return pd.DataFrame(columns=["sheet", "date", "product_code", "color", "plan_qty"])
+    plan_df = pd.DataFrame(rows)
+    plan_df = plan_df.groupby(["date", "product_code", "color"], as_index=False)["plan_qty"].sum()
+    return plan_df
 
 
 def expand_parts(parts):
@@ -266,6 +273,7 @@ def optimize_parts(parts, board_width, board_height, kerf, margin, rotate_allowe
                     "part_code": part["part_code"],
                     "product_code": part["product_code"],
                     "color": part["color"],
+                    "thickness_mm": part["thickness_mm"],
                 })
                 sheet["free_rects"].extend(split_rect(rect, best["w"], best["h"], kerf))
                 sheet["free_rects"] = prune_rects(sheet["free_rects"])
@@ -285,6 +293,7 @@ def optimize_parts(parts, board_width, board_height, kerf, margin, rotate_allowe
                     "part_code": part["part_code"],
                     "product_code": part["product_code"],
                     "color": part["color"],
+                    "thickness_mm": part["thickness_mm"],
                 })
                 sheet["free_rects"].extend(split_rect(rect, best["w"], best["h"], kerf))
                 sheet["free_rects"] = prune_rects(sheet["free_rects"])
@@ -295,7 +304,14 @@ def optimize_parts(parts, board_width, board_height, kerf, margin, rotate_allowe
     board_area = board_width * board_height
     used = len(all_sheets)
     yield_rate = round((total_area / (used * board_area)) * 100, 2) if used else 0.0
-    return {"board_width_mm": board_width, "board_height_mm": board_height, "used_boards": used, "yield_rate": yield_rate, "waste_area": max(0.0, used*board_area-total_area), "sheets": all_sheets}
+    return {
+        "board_width_mm": board_width,
+        "board_height_mm": board_height,
+        "used_boards": used,
+        "yield_rate": yield_rate,
+        "waste_area": max(0.0, used * board_area - total_area),
+        "sheets": all_sheets,
+    }
 
 
 def analyze_alternatives(parts, bw, bh, kerf, margin, rotate_allowed, mix_same_color_thickness):
@@ -309,7 +325,15 @@ def analyze_alternatives(parts, bw, bh, kerf, margin, rotate_allowed, mix_same_c
     rows = []
     for name, sw, sh, sm in scenarios:
         r = optimize_parts(parts, sw, sh, kerf, sm, rotate_allowed, mix_same_color_thickness)
-        rows.append({"시나리오": name, "원장 가로": sw, "원장 세로": sh, "여유치": sm, "사용 원장 수": r["used_boards"], "수율(%)": r["yield_rate"], "자투리 면적": r["waste_area"]})
+        rows.append({
+            "시나리오": name,
+            "원장 가로": sw,
+            "원장 세로": sh,
+            "여유치": sm,
+            "사용 원장 수": r["used_boards"],
+            "수율(%)": r["yield_rate"],
+            "자투리 면적": r["waste_area"],
+        })
     df = pd.DataFrame(rows)
     best = df.sort_values(["수율(%)", "사용 원장 수"], ascending=[False, True]).iloc[0]
     summary = f"분석 결과, '{best['시나리오']}' 조건이 가장 높은 수율을 보였습니다. 예상 수율은 {best['수율(%)']}%이며, 사용 원장 수는 {int(best['사용 원장 수'])}장입니다."
@@ -329,27 +353,35 @@ def make_svg(sheet, board_width_mm, board_height_mm):
     return f'<div style="overflow:auto; border:1px solid #ddd; padding:12px; background:#fff;"><svg width="{svg_width}" height="{svg_height}" xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="{svg_width}" height="{svg_height}" fill="white" stroke="#333" stroke-width="2"></rect>{"".join(parts_svg)}</svg></div>'
 
 
-st.title("목재 재단 프로그램 Fast v10")
-st.caption("월생산계획 해석 정확도 개선 + 날짜별 추가 재단")
+st.title("목재 재단 프로그램 Fast v11")
+st.caption("BOM URL(ngrok) 연동 + 주차별 계획 자동 재단")
 
-bom_file = st.file_uploader("BOM 엑셀 업로드", type=["xlsx", "xls"], key="bom")
-plan_file = st.file_uploader("월생산계획 업로드", type=["xlsx", "xls"], key="plan")
+st.subheader("BOM 데이터 소스")
+bom_url = st.text_input("BOM URL (ngrok 또는 직접 다운로드 링크)", placeholder="https://xxxx.ngrok-free.app/BOM_DATA.xlsx")
+bom_file = st.file_uploader("또는 BOM 엑셀 업로드", type=["xlsx", "xls"], key="bom")
+plan_file = st.file_uploader("주차별 생산계획 업로드", type=["xlsx", "xls"], key="plan")
 
 bom_df = None
-if bom_file is not None:
-    raw_bom = pd.read_excel(bom_file)
-    bom_df, bom_errors = load_bom(raw_bom)
-    st.success(f"BOM 업로드 완료: {len(bom_df)}행")
-    with st.expander("BOM 전체 데이터 보기", expanded=True):
-        st.dataframe(bom_df, use_container_width=True, height=520)
+try:
+    raw_bom = read_bom_from_source(bom_file, bom_url)
+    if raw_bom is not None:
+        bom_df, bom_errors = load_bom(raw_bom)
+        st.success(f"BOM 로드 완료: {len(bom_df)}행")
+        with st.expander("BOM 전체 데이터 보기", expanded=True):
+            st.dataframe(bom_df, use_container_width=True, height=520)
+        if not bom_errors.empty:
+            with st.expander("BOM 검증 오류", expanded=False):
+                st.dataframe(bom_errors, use_container_width=True, height=180)
+except Exception as e:
+    st.error(f"BOM 로드 오류: {e}")
 
 if bom_df is not None and plan_file is not None:
     plan_df = parse_plan_workbook(plan_file)
     if plan_df.empty:
-        st.warning("월생산계획 파일 해석 결과가 없습니다. 시트 구조를 확인해 주세요.")
+        st.warning("주차별 파일에서 월~토 계획을 찾지 못했습니다.")
     else:
-        st.success(f"월생산계획 해석 완료: {len(plan_df)}건")
-        with st.expander("월생산계획 해석 결과 보기", expanded=False):
+        st.success(f"주차별 생산계획 해석 완료: {len(plan_df)}건")
+        with st.expander("해석된 생산계획 보기", expanded=False):
             st.dataframe(plan_df, use_container_width=True, height=240)
 
         board_preset = st.selectbox("원장 규격 선택", list(BOARD_PRESETS.keys()), index=0)
@@ -360,38 +392,47 @@ if bom_df is not None and plan_file is not None:
         rotate_allowed = c3.checkbox("회전 허용", value=True)
         mix_same = st.checkbox("같은 색상 + 같은 두께 혼합 재단", value=True)
 
-        st.subheader("날짜별 추가 재단 입력")
+        st.subheader("날짜별 추가 재단")
         unique_dates = sorted(plan_df["date"].dropna().unique().tolist())
         add_date = st.selectbox("추가 재단 날짜", unique_dates)
-        add_product = st.text_input("추가 재단 제품코드")
+        add_product = st.text_input("추가 재단 품목코드")
+        add_color = st.text_input("추가 재단 색상", placeholder="색상 미입력 시 품목코드만 비교")
         add_qty = st.number_input("추가 재단 수량", min_value=1, value=1, step=1)
-        if "extra_plan_rows" not in st.session_state:
-            st.session_state["extra_plan_rows"] = []
+
+        if "extra_plan_rows_v11" not in st.session_state:
+            st.session_state["extra_plan_rows_v11"] = []
+
         if st.button("추가 재단 품목 등록"):
-            if add_product.strip():
-                st.session_state["extra_plan_rows"].append({
-                    "sheet": "MANUAL",
+            if normalize_text(add_product):
+                st.session_state["extra_plan_rows_v11"].append({
                     "date": add_date,
-                    "product_code": add_product.strip(),
-                    "color": "",
+                    "product_code": normalize_text(add_product),
+                    "color": normalize_text(add_color),
                     "plan_qty": int(add_qty),
                 })
                 st.success("추가 재단 품목이 등록되었습니다.")
 
-        extra_df = pd.DataFrame(st.session_state["extra_plan_rows"])
+        extra_df = pd.DataFrame(st.session_state["extra_plan_rows_v11"])
         if not extra_df.empty:
-            st.dataframe(extra_df, use_container_width=True, height=160)
+            with st.expander("추가 재단 등록 목록", expanded=False):
+                st.dataframe(extra_df, use_container_width=True, height=180)
             plan_df = pd.concat([plan_df, extra_df], ignore_index=True)
 
         daily_rows = []
         detail_results = {}
+        analysis_rows = []
 
         for d, g in plan_df.groupby("date"):
             parts = []
             for _, row in g.iterrows():
                 product_code = normalize_text(row["product_code"])
+                color = normalize_text(row.get("color"))
                 plan_qty = to_int(row["plan_qty"], 0)
                 matched = bom_df[(bom_df["product_code"] == product_code) & (bom_df["is_cutting_target"] == True)].copy()
+                if color:
+                    color_match = matched[matched["color"] == color].copy()
+                    if not color_match.empty:
+                        matched = color_match
                 if matched.empty:
                     continue
                 matched["actual_cut_qty"] = plan_qty
@@ -417,7 +458,17 @@ if bom_df is not None and plan_file is not None:
                     "자투리 면적": sub["waste_area"],
                 })
 
-        daily_df = pd.DataFrame(daily_rows)
+            analysis_df, summary = analyze_alternatives(parts, bw, bh, float(kerf), float(margin), rotate_allowed, mix_same)
+            best_row = analysis_df.sort_values(["수율(%)", "사용 원장 수"], ascending=[False, True]).iloc[0]
+            analysis_rows.append({
+                "date": d,
+                "추천 시나리오": best_row["시나리오"],
+                "추천 수율(%)": best_row["수율(%)"],
+                "추천 사용 원장 수": best_row["사용 원장 수"],
+                "분석 요약": summary,
+            })
+
+        daily_df = pd.DataFrame(daily_rows, columns=DAILY_RESULT_COLS)
         if daily_df.empty:
             st.warning("날짜별 재단 계획 결과가 없습니다.")
         else:
@@ -425,22 +476,9 @@ if bom_df is not None and plan_file is not None:
             st.subheader("날짜별 / 두께별 / 색상별 재단 계획")
             st.dataframe(daily_df, use_container_width=True, height=420)
 
-            all_parts = []
-            for d, g in plan_df.groupby("date"):
-                for _, row in g.iterrows():
-                    product_code = normalize_text(row["product_code"])
-                    plan_qty = to_int(row["plan_qty"], 0)
-                    matched = bom_df[(bom_df["product_code"] == product_code) & (bom_df["is_cutting_target"] == True)].copy()
-                    if matched.empty:
-                        continue
-                    matched["actual_cut_qty"] = plan_qty
-                    matched["qty"] = matched["bom_qty"].astype(int) * plan_qty
-                    all_parts.extend(matched.to_dict("records"))
-
-            analysis_df, summary = analyze_alternatives(all_parts, bw, bh, float(kerf), float(margin), rotate_allowed, mix_same)
-            st.subheader("재단 수율 개선 분석")
-            st.info(summary)
-            st.dataframe(analysis_df, use_container_width=True, height=220)
+            st.subheader("날짜별 재단 수율 분석")
+            daily_analysis_df = pd.DataFrame(analysis_rows)
+            st.dataframe(daily_analysis_df, use_container_width=True, height=240)
 
             selected_date = st.selectbox("날짜별 분할도 보기", sorted(detail_results.keys()))
             selected_result = detail_results[selected_date]
@@ -451,4 +489,7 @@ if bom_df is not None and plan_file is not None:
                 selected_sheet = next(s for s in selected_result["sheets"] if s["sheet_no"] == selected_sheet_no)
                 st.subheader(f"{selected_date} 분할도")
                 components.html(make_svg(selected_sheet, selected_result["board_width_mm"], selected_result["board_height_mm"]), height=700, scrolling=True)
-                st.metric("해당 일자 사용 원장 수", selected_result["used_boards"])
+                a1, a2, a3 = st.columns(3)
+                a1.metric("해당 일자 사용 원장 수", selected_result["used_boards"])
+                a2.metric("해당 일자 수율", f"{selected_result['yield_rate']}%")
+                a3.metric("해당 일자 자투리 면적", f"{selected_result['waste_area']:,}")
