@@ -16,7 +16,7 @@ BOARD_PRESETS = {
 MAX_PLAN_ROWS = 120
 MAX_SHEETS_RENDER = 20
 
-st.set_page_config(page_title="목재 재단 프로그램 Fast v19", layout="wide")
+st.set_page_config(page_title="목재 재단 프로그램 Fast v20", layout="wide")
 
 
 def normalize_text(v):
@@ -203,7 +203,7 @@ def aggregate_parts(parts_df, mix_same):
 def expand_agg_parts(agg_df):
     expanded = []
     for _, p in agg_df.iterrows():
-        repeat = min(max(1, to_int(p["qty"], 1)), 50)  # runaway protection
+        repeat = min(max(1, to_int(p["qty"], 1)), 50)
         for _ in range(repeat):
             expanded.append({
                 "group_name": p["group_name"],
@@ -222,7 +222,6 @@ def optimize_parts_fast(parts_df, board_width, board_height, kerf, margin, rotat
     usable_h = board_height - margin * 2
     agg_df = aggregate_parts(parts_df, mix_same)
     expanded = expand_agg_parts(agg_df)
-
     sheets = []
     for part in expanded:
         placed = False
@@ -261,11 +260,7 @@ def optimize_parts_fast(parts_df, board_width, board_height, kerf, margin, rotat
         if not placed:
             if len(sheets) >= MAX_SHEETS_RENDER:
                 break
-            sheet = {
-                "sheet_no": len(sheets) + 1,
-                "placements": [],
-                "free_rects": [{"x": 0.0, "y": 0.0, "w": usable_w, "h": usable_h}],
-            }
+            sheet = {"sheet_no": len(sheets) + 1, "placements": [], "free_rects": [{"x": 0.0, "y": 0.0, "w": usable_w, "h": usable_h}]}
             sheets.append(sheet)
             rect = sheet["free_rects"].pop(0)
             sheet["placements"].append({
@@ -284,7 +279,6 @@ def optimize_parts_fast(parts_df, board_width, board_height, kerf, margin, rotat
                 sheet["free_rects"].append({"x": rect["x"] + part["width_mm"] + kerf, "y": rect["y"], "w": right_w, "h": part["height_mm"]})
             if bottom_h > 0:
                 sheet["free_rects"].append({"x": rect["x"], "y": rect["y"] + part["height_mm"] + kerf, "w": rect["w"], "h": bottom_h})
-
     total_area = sum(p["width_mm"] * p["height_mm"] for s in sheets for p in s["placements"])
     board_area = board_width * board_height
     used = len(sheets)
@@ -325,7 +319,7 @@ try:
     bom_df = None
     if bom_file is not None or normalize_text(bom_url):
         raw_bom = read_bom(bom_file, bom_url)
-        bom_df, bom_errors = load_bom(raw_bom)
+        bom_df = load_bom(raw_bom)
         st.success(f"BOM 로드 완료: {len(bom_df)}행")
         with st.expander("BOM 전체 데이터 보기", expanded=False):
             st.dataframe(bom_df.head(300), width="stretch", height=420)
@@ -354,7 +348,6 @@ try:
             selected_date = st.selectbox("작업 날짜 선택", date_options)
 
             date_plan = plan_df[plan_df["date"] == selected_date].copy()
-
             parts_rows = []
             for _, row in date_plan.iterrows():
                 product_code = normalize_text(row["product_code"])
@@ -410,13 +403,7 @@ try:
                 st.dataframe(summary_df, width="stretch", height=220)
 
                 workorder_bytes = build_workorder_excel(summary_df, placement_df)
-                st.download_button(
-                    "작업지시서 엑셀 다운로드",
-                    data=workorder_bytes,
-                    file_name=f"wood_cutting_workorder_{selected_date}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    width="stretch",
-                )
+                st.download_button("작업지시서 엑셀 다운로드", data=workorder_bytes, file_name=f"wood_cutting_workorder_{selected_date}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
 
                 if result["sheets"]:
                     labels = [f"Sheet {s['sheet_no']}" for s in result["sheets"]]
@@ -432,7 +419,6 @@ try:
                 st.warning("선택한 날짜에 BOM과 매칭된 재단 데이터가 없습니다.")
         else:
             st.warning("주차별 생산계획을 자동 해석하지 못했습니다.")
-
 except Exception as e:
     st.error(f"앱 실행 오류: {type(e).__name__}: {e}")
     with st.expander("오류 상세", expanded=True):
