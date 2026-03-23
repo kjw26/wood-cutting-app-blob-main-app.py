@@ -13,11 +13,11 @@ BOARD_PRESETS = {
     "4x8 (1220 x 2440)": (2440.0, 1220.0),
     "4x6 (1220 x 1830)": (1830.0, 1220.0),
 }
-MAX_PLAN_ROWS = 300
-MAX_EXPANDED_PARTS = 1500
-MAX_SHEETS_RENDER = 30
+MAX_PLAN_ROWS = 500
+MAX_EXPANDED_PARTS = 2000
+MAX_SHEETS_RENDER = 40
 
-st.set_page_config(page_title="목재 재단 프로그램 v21", layout="wide")
+st.set_page_config(page_title="목재 재단 프로그램 v22", layout="wide")
 
 
 def normalize_text(v):
@@ -59,11 +59,16 @@ def parse_date_like(val):
     text = normalize_text(val)
     if not text:
         return None
+
+    candidates = [text]
     cleaned = re.sub(r"\([^)]*\)", "", text)
     cleaned = cleaned.replace(".", "/").replace("-", "/")
-    cleaned = re.sub(r"[가-힣A-Za-z]", "", cleaned)
-    cleaned = re.sub(r"\s+", "", cleaned).strip()
-    for cand in [cleaned, text]:
+    cleaned = re.sub(r"\s+", "", cleaned)
+    cleaned_no_letters = re.sub(r"[A-Za-z가-힣]", "", cleaned)
+    candidates.extend([cleaned, cleaned_no_letters])
+
+    for cand in candidates:
+        cand = cand.strip()
         if not cand:
             continue
         if re.match(r"^\d{2}/\d{2}$", cand):
@@ -132,30 +137,86 @@ def load_bom(df):
     return bom_df, err_df
 
 
-def find_header_layout(raw):
-    rows = min(len(raw), 45)
-    cols = min(len(raw.columns), 55)
+def detect_text_column(raw, keywords, rows=25, cols=60):
+    best = None
+    best_row = None
+    rows = min(len(raw), rows)
+    cols = min(len(raw.columns), cols)
     for r in range(rows):
-        row_text = [normalize_text(raw.iat[r, c]).replace(" ", "") for c in range(cols)]
-        product_candidates = [i for i, v in enumerate(row_text) if "품목코드" in v]
-        if not product_candidates:
-            continue
-        product_col = product_candidates[0]
-        color_candidates = [i for i, v in enumerate(row_text) if "색상" in v]
-        color_col = color_candidates[0] if color_candidates else min(product_col + 1, cols - 1)
-        date_cols = []
-        for rr in [r, min(r + 1, len(raw) - 1), min(r + 2, len(raw) - 1)]:
-            local = []
-            for c in range(cols):
-                ts = parse_date_like(raw.iat[rr, c])
-                if ts is not None and ts.weekday() <= 5:
-                    local.append((c, str(ts.date())))
-            if len(local) >= 2:
-                date_cols = local
-                break
-        if len(date_cols) >= 2:
-            return {"data_start_row": r + 1, "product_col": product_col, "color_col": color_col, "date_cols": date_cols}
-    return None
+        for c in range(cols):
+            val = normalize_text(raw.iat[r, c]).replace(" ", "")
+            if any(k in val for k in keywords):
+                if best is None or r < best_row:
+                    best = c
+                    best_row = r
+    return best, best_row
+
+
+def detect_date_columns(raw, rows=25, cols=60):
+    rows = min(len(raw), rows)
+    cols = min(len(raw.columns), cols)
+    row_hits = []
+    for r in range(rows):
+        hits = []
+        for c in range(cols):
+            ts = parse_date_like(raw.iat[r, c])
+            if ts is not None and ts.weekday() <= 5:
+                hits.append((c, str(ts.date())))
+        unique_hits = []
+        seen = set()
+        for c, d in hits:
+            if c not in seen:
+                unique_hits.append((c, d))
+                seen.add(c)
+        if len(unique_hits) >= 2:
+            row_hits.append((r, unique_hits))
+    if not row_hits:
+        return None, None
+    # prefer row with most hits and nearer to top
+    row_hits.sort(key=lambda x: (-len(x[1]), x[0]))
+    return row_hits[0][0], row_hits[0][1]
+
+
+def detect_data_start_row(raw, product_col, date_cols, search_start):
+    rows = len(raw)
+    for r in range(min(rows - 1, search_start), rows):
+        prod = normalize_text(raw.iat[r, product_col]) if product_col < len(raw.columns) else ""
+        qty_hits = 0
+        for c, _ in date_cols:
+            if c >= len(raw.columns):
+                continue
+            if to_int(raw.iat[r, c], 0) > 0:
+                qty_hits += 1
+        if prod and qty_hits >= 0:
+            return r
+    return min(search_start + 1, max(rows - 1, 0))
+
+
+def find_header_layout(raw):
+    rows = min(len(raw), 60)
+    cols = min(len(raw.columns), 70)
+
+    product_col, product_row = detect_text_column(raw, ["품목코드", "productcode", "product_code"], rows, cols)
+    color_col, color_row = detect_text_column(raw, ["색상", "color"], rows, cols)
+    date_row, date_cols = detect_date_columns(raw, rows, cols)
+
+    if product_col is None or date_cols is None:
+        return None
+
+    if color_col is None:
+        color_col = min(product_col + 1, cols - 1)
+
+    header_anchor = min([x for x in [product_row, color_row, date_row] if x is not None])
+    data_start_row = detect_data_start_row(raw, product_col, date_cols, max(header_anchor + 1, date_row))
+
+    return {
+        "product_col": product_col,
+        "color_col": color_col,
+        "date_cols": date_cols,
+        "header_row": header_anchor,
+        "date_row": date_row,
+        "data_start_row": data_start_row,
+    }
 
 
 def parse_plan_workbook_auto(file):
@@ -168,25 +229,54 @@ def parse_plan_workbook_auto(file):
             if raw.empty:
                 logs.append({"sheet": sheet, "status": "skip", "reason": "빈 시트"})
                 continue
+
             layout = find_header_layout(raw)
             if layout is None:
                 logs.append({"sheet": sheet, "status": "skip", "reason": "헤더 인식 실패"})
                 continue
+
             current_product = ""
             added = 0
             for r in range(layout["data_start_row"], len(raw)):
                 product_cell = normalize_text(raw.iat[r, layout["product_col"]]) if layout["product_col"] < len(raw.columns) else ""
                 if product_cell:
                     current_product = product_cell
-                if not current_product or any(x in current_product for x in ["품목코드", "색상", "Packing", "Division", "주간계", "weekly"]):
+
+                if not current_product:
                     continue
+                if any(x in current_product for x in ["품목코드", "색상", "Packing", "Division", "주간계", "weekly", "Date", "작성일"]):
+                    continue
+
                 color = normalize_text(raw.iat[r, layout["color_col"]]) if layout["color_col"] < len(raw.columns) else ""
+                row_added = 0
                 for c, d in layout["date_cols"]:
+                    if c >= len(raw.columns):
+                        continue
                     qty = to_int(raw.iat[r, c], 0)
                     if qty > 0:
-                        all_rows.append({"sheet": str(sheet), "date": d, "product_code": current_product, "color": color, "plan_qty": qty})
+                        all_rows.append({
+                            "sheet": str(sheet),
+                            "date": d,
+                            "product_code": current_product,
+                            "color": color,
+                            "plan_qty": qty,
+                        })
+                        row_added += 1
                         added += 1
-            logs.append({"sheet": sheet, "status": "ok" if added else "empty", "rows": added})
+                if row_added == 0 and not product_cell:
+                    continue
+
+            logs.append({
+                "sheet": sheet,
+                "status": "ok" if added else "empty",
+                "header_row": layout["header_row"],
+                "date_row": layout["date_row"],
+                "data_start_row": layout["data_start_row"],
+                "product_col": layout["product_col"],
+                "color_col": layout["color_col"],
+                "date_col_count": len(layout["date_cols"]),
+                "rows": added,
+            })
         except Exception as e:
             logs.append({"sheet": sheet, "status": "error", "reason": f"{type(e).__name__}: {e}"})
     plan_df = pd.DataFrame(all_rows)
@@ -442,8 +532,8 @@ def build_workorder_excel(summary_df, placement_df, scrap_used_df, scenario_df):
 
 
 try:
-    st.title("목재 재단 프로그램 v21")
-    st.caption("BOM + 생산계획 + 자투리 우선 사용 + 날짜별 작업지시서")
+    st.title("목재 재단 프로그램 v22")
+    st.caption("고도화된 생산계획 파서 + 자투리 우선 사용 + 날짜별 작업지시서")
 
     st.subheader("입력")
     bom_url = st.text_input("BOM URL (기본 고정)", value=DEFAULT_BOM_URL)
