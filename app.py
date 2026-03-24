@@ -8,11 +8,13 @@ import streamlit.components.v1 as components
 
 DEFAULT_BOM_URL = "https://raw.githubusercontent.com/kjw26/wood-cutting-app-blob-main-app.py/main/BOM_DATA.xlsx"
 BOARD_PRESETS = {"4x8 (1220 x 2440)": (2440.0, 1220.0), "4x6 (1220 x 1830)": (1830.0, 1220.0)}
-MAX_PLAN_ROWS = 200
-MAX_EXPANDED_PARTS = 500
-MAX_SHEETS_RENDER = 20
 
-st.set_page_config(page_title="목재 재단 프로그램 v31 Thickness Fix", layout="wide")
+MAX_PLAN_ROWS = 120
+MAX_EXPANDED_PARTS = 250
+MAX_SHEETS_RENDER = 12
+MAX_MATCH_ROWS = 150
+
+st.set_page_config(page_title="목재 재단 프로그램 v32 Speed Fix", layout="wide")
 
 def normalize_text(v):
     if v is None:
@@ -211,7 +213,7 @@ def aggregate_parts(parts_df):
 def expand_agg_parts(agg_df):
     expanded = []
     for _, p in agg_df.iterrows():
-        repeat = min(max(1, to_int(p["qty"], 1)), 25)
+        repeat = min(max(1, to_int(p["qty"], 1)), 15)
         for _ in range(repeat):
             expanded.append({
                 "product_code": p["product_code"],
@@ -329,8 +331,8 @@ def export_grouped_workorders_excel(group_results):
     output.seek(0)
     return output.getvalue()
 
-st.title("목재 재단 프로그램 v31 Thickness Fix")
-st.caption("두께별 분리 재단 고정 버전")
+st.title("목재 재단 프로그램 v32 Speed Fix")
+st.caption("속도 개선 + MAX_MATCH_ROWS 에러 수정 + 두께별 분리 유지")
 
 bom_url = st.text_input("BOM URL (기본 고정)", value=DEFAULT_BOM_URL)
 bom_file = st.file_uploader("또는 BOM 엑셀 업로드", type=["xlsx", "xls"], key="bom")
@@ -401,16 +403,21 @@ try:
                         sub = parts_df[parts_df["thickness_mm"] == thickness].copy()
                         result = optimize_parts_fast(sub, bw, bh, float(kerf), float(margin), rotate_allowed)
                         for s in result["sheets"]:
-                            group_results.append({"thickness_mm": thickness, "board_width_mm": result["board_width_mm"], "board_height_mm": result["board_height_mm"], "sheet": s})
+                            group_results.append({
+                                "thickness_mm": thickness,
+                                "board_width_mm": result["board_width_mm"],
+                                "board_height_mm": result["board_height_mm"],
+                                "sheet": s,
+                            })
 
-                    st.warning("두께가 다른 부품은 이제 같은 분할도에 들어가지 않도록 두께별로 강제 분리했습니다.")
+                    st.info("두께별로 분리 계산하므로 서로 다른 두께는 같은 분할도에 들어가지 않습니다.")
 
                     summary_rows = []
                     for g in group_results:
                         summary_rows.append({"두께(mm)": g["thickness_mm"], "시트번호": g["sheet"]["sheet_no"], "배치부품수": len(g["sheet"]["placements"])})
                     st.dataframe(pd.DataFrame(summary_rows), width="stretch", height=220)
 
-                    st.download_button("두께별 패턴 작업지시서 다운로드", data=export_grouped_workorders_excel(group_results), file_name="pattern_workorders_v31_thickness_fix.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+                    st.download_button("두께별 패턴 작업지시서 다운로드", data=export_grouped_workorders_excel(group_results), file_name="pattern_workorders_v32_speed_fix.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
 
                     labels = [f"t{g['thickness_mm']} / Sheet {g['sheet']['sheet_no']}" for g in group_results]
                     if labels:

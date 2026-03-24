@@ -1,1 +1,1 @@
-# 목재 재단 프로그램 v31 Thickness Fix
+# 목재 재단 프로그램 v32 Speed Fix
