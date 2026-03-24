@@ -9,7 +9,7 @@ BOARD_PRESETS = {"4x8 (1220 x 2440)": (2440.0, 1220.0), "4x6 (1220 x 1830)": (18
 MAX_PLAN_ROWS = 800
 MAX_EXPANDED_PARTS = 3000
 MAX_SHEETS_RENDER = 80
-st.set_page_config(page_title="목재 재단 프로그램 v25", layout="wide")
+st.set_page_config(page_title="목재 재단 프로그램 v26", layout="wide")
 
 def normalize_text(v):
     if v is None: return ""
@@ -126,7 +126,8 @@ def parse_plan_workbook_auto(file):
             layout = find_header_layout(raw)
             if layout is None:
                 logs.append({"sheet": sheet, "status": "skip", "reason": "헤더 인식 실패"}); continue
-            current_product=""; added=0
+            current_product=""
+            added=0
             for r in range(layout["data_start_row"], len(raw)):
                 product_cell=normalize_text(raw.iat[r,layout["product_col"]]) if layout["product_col"] < len(raw.columns) else ""
                 if product_cell: current_product=product_cell
@@ -250,24 +251,22 @@ def optimize_parts_fast(parts_df, scrap_df, board_width, board_height, kerf, mar
     board_area=board_width*board_height; used=len(sheets); yield_rate=round((total_area/(used*board_area))*100,2) if used else 0.0
     return {"board_width_mm":board_width,"board_height_mm":board_height,"used_boards":used,"yield_rate":yield_rate,"waste_area":max(0.0, used*board_area-(total_area-sum(p["width_mm"]*p["height_mm"] for p in scrap_used))),"sheets":sheets,"scrap_used":scrap_used}
 
-def shape_signature(sheet):
-    # Truly identical cutting diagram: compare only geometry/layout, not labels/date/product
+def exact_signature(sheet):
     sig=[]
-    for p in sorted(sheet["placements"], key=lambda x:(x["x_mm"], x["y_mm"], x["width_mm"], x["height_mm"])):
-        sig.append((round(float(p["x_mm"]),1), round(float(p["y_mm"]),1), round(float(p["width_mm"]),1), round(float(p["height_mm"]),1)))
+    for p in sorted(sheet["placements"], key=lambda x:(x["part_code"],x["part_name"],x["product_code"],x["date"],x["color"],x["thickness_mm"],x["width_mm"],x["height_mm"],x["x_mm"],x["y_mm"])):
+        sig.append((p["part_code"],p["part_name"],p["product_code"],p["date"],p["color"],round(float(p["thickness_mm"]),1),round(float(p["width_mm"]),1),round(float(p["height_mm"]),1),round(float(p["x_mm"]),1),round(float(p["y_mm"]),1)))
     return tuple(sig)
 
-def compress_sheets(sheets):
+def compress_sheets_exact(sheets):
     groups={}
     for s in sheets:
-        sig=shape_signature(s)
+        sig=exact_signature(s)
         groups.setdefault(sig, {"count":0, "sheet":s, "all_placements":[]})
         groups[sig]["count"] += 1
         groups[sig]["all_placements"].extend(s["placements"])
     out=[]
     for i,g in enumerate(groups.values(), start=1):
-        rep = {"sheet_no": i, "placements": g["sheet"]["placements"], "count": g["count"], "all_placements": g["all_placements"]}
-        out.append(rep)
+        out.append({"sheet_no":i, "placements":g["sheet"]["placements"], "count":g["count"], "all_placements":g["all_placements"]})
     return out
 
 def scenario_table(parts_df, scrap_df, kerf, margin, rotate_allowed, mix_same):
@@ -285,10 +284,17 @@ def make_svg(sheet, board_width_mm, board_height_mm):
         x,y=p["x_mm"]*scale,p["y_mm"]*scale; w,h=p["width_mm"]*scale,p["height_mm"]*scale
         t1=f"{p['part_code']} / {p['product_code']}"
         t2=f"{p['part_name'][:16]} / {p['color']} / {p['date'][5:]}"
-        t3=f"{p['width_mm']}x{p['height_mm']}"
+        t3=f"{p['width_mm']}x{p['height_mm']} / t{p['thickness_mm']}"
         parts_svg.append(f'<g><rect x="{x}" y="{y}" width="{w}" height="{h}" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.2"></rect><text x="{x+4}" y="{y+16}" font-size="11" fill="#111">{t1}</text><text x="{x+4}" y="{y+30}" font-size="11" fill="#111">{t2}</text><text x="{x+4}" y="{y+44}" font-size="11" fill="#111">{t3}</text></g>')
-    badge = f'<text x="10" y="20" font-size="16" fill="#b91c1c">똑같은 분할도 x{sheet.get("count",1)}장</text>' if sheet.get("count",1)>1 else ""
+    badge = f'<text x="10" y="20" font-size="16" fill="#b91c1c">정밀형 동일 분할도 x{sheet.get("count",1)}장</text>' if sheet.get("count",1)>1 else ""
     return f'<div style="overflow:auto; border:1px solid #ddd; padding:12px; background:#fff;"><svg width="{svg_width}" height="{svg_height}" xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="{svg_width}" height="{svg_height}" fill="white" stroke="#333" stroke-width="2"></rect>{badge}{"".join(parts_svg)}</svg></div>'
+
+def render_all_sheet_svgs(compressed_sheets, board_w, board_h):
+    blocks=[]
+    for s in compressed_sheets:
+        blocks.append(f"<h4>Sheet {s['sheet_no']} (x{s.get('count',1)})</h4>")
+        blocks.append(make_svg(s, board_w, board_h))
+    return "<hr/>".join(blocks)
 
 def build_workorder_excel(summary_df, placement_df, scrap_used_df, scenario_df):
     output=io.BytesIO()
@@ -300,8 +306,8 @@ def build_workorder_excel(summary_df, placement_df, scrap_used_df, scenario_df):
     output.seek(0); return output.getvalue()
 
 try:
-    st.title("목재 재단 프로그램 v25")
-    st.caption("똑같은 분할도만 동일 시트로 분류")
+    st.title("목재 재단 프로그램 v26")
+    st.caption("정밀형 동일 분할도 분류 + 두께 표시 + 작업지시서용 전체 분할도 출력")
     st.subheader("입력")
     bom_url=st.text_input("BOM URL (기본 고정)", value=DEFAULT_BOM_URL)
     bom_file=st.file_uploader("또는 BOM 엑셀 업로드", type=["xlsx","xls"], key="bom")
@@ -355,19 +361,19 @@ try:
                 result=optimize_parts_fast(parts_df, scrap_df, bw, bh, float(kerf), float(margin), rotate_allowed, mix_same)
                 scenario_df=scenario_table(parts_df, scrap_df, float(kerf), float(margin), rotate_allowed, mix_same)
                 summary_df=(parts_df.groupby(["color","thickness_mm"], dropna=False).agg(총_재단_수량=("qty","sum"), 품목수=("part_code","count"), 날짜수=("date","nunique")).reset_index().rename(columns={"color":"색상","thickness_mm":"두께(mm)","총_재단_수량":"총 재단 수량"}))
-                compressed_sheets=compress_sheets(result["sheets"])
+                compressed_sheets=compress_sheets_exact(result["sheets"])
                 placement_rows=[]
                 for s in compressed_sheets:
                     for p in s["all_placements"]:
-                        placement_rows.append({"sheet_no":s["sheet_no"],"동일분할도수":s.get("count",1),"date":p["date"],"group_name":p["group_name"],"product_code":p["product_code"],"part_code":p["part_code"],"part_name":p["part_name"],"color":p["color"],"thickness_mm":p["thickness_mm"],"x_mm":p["x_mm"],"y_mm":p["y_mm"],"width_mm":p["width_mm"],"height_mm":p["height_mm"]})
+                        placement_rows.append({"sheet_no":s["sheet_no"],"정밀동일분할도수":s.get("count",1),"date":p["date"],"group_name":p["group_name"],"product_code":p["product_code"],"part_code":p["part_code"],"part_name":p["part_name"],"color":p["color"],"thickness_mm":p["thickness_mm"],"x_mm":p["x_mm"],"y_mm":p["y_mm"],"width_mm":p["width_mm"],"height_mm":p["height_mm"]})
                 placement_df=pd.DataFrame(placement_rows); scrap_used_df=pd.DataFrame(result["scrap_used"])
                 st.subheader(f"{title_date} 작업지시서")
                 m1,m2,m3,m4=st.columns(4)
-                m1.metric("사용 원장 수", result["used_boards"]); m2.metric("수율", f"{result['yield_rate']}%"); m3.metric("자투리 사용 수", len(result["scrap_used"])); m4.metric("똑같은 분할도 수", len(compressed_sheets))
+                m1.metric("사용 원장 수", result["used_boards"]); m2.metric("수율", f"{result['yield_rate']}%"); m3.metric("자투리 사용 수", len(result["scrap_used"])); m4.metric("정밀 동일 분할도 수", len(compressed_sheets))
                 st.markdown("#### 색상 / 두께별 작업 요약"); st.dataframe(summary_df, width="stretch", height=220)
                 st.markdown("#### 시나리오 분석"); st.dataframe(scenario_df, width="stretch", height=200)
                 workorder_bytes=build_workorder_excel(summary_df, placement_df, scrap_used_df, scenario_df)
-                st.download_button("작업지시서 엑셀 다운로드", data=workorder_bytes, file_name="wood_cutting_workorder_v25.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+                st.download_button("작업지시서 엑셀 다운로드", data=workorder_bytes, file_name="wood_cutting_workorder_v26.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
                 if compressed_sheets:
                     labels=[f"Sheet {s['sheet_no']} (x{s.get('count',1)})" for s in compressed_sheets]
                     selected_sheet_label=st.selectbox("시트 선택", labels)
@@ -375,6 +381,8 @@ try:
                     selected_sheet=next(s for s in compressed_sheets if s["sheet_no"]==selected_sheet_no)
                     st.markdown("#### 분할도")
                     components.html(make_svg(selected_sheet, result["board_width_mm"], result["board_height_mm"]), height=720, scrolling=True)
+                    st.markdown("#### 작업지시서용 전체 분할도")
+                    components.html(render_all_sheet_svgs(compressed_sheets, result["board_width_mm"], result["board_height_mm"]), height=1200, scrolling=True)
                 if not scrap_used_df.empty:
                     with st.expander("자투리 사용 내역", expanded=False):
                         st.dataframe(scrap_used_df, width="stretch", height=180)
