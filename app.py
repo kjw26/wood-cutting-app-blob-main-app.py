@@ -1,4 +1,6 @@
-import io, re, traceback
+import io
+import re
+import traceback
 import pandas as pd
 import requests
 import streamlit as st
@@ -6,10 +8,10 @@ import streamlit.components.v1 as components
 
 DEFAULT_BOM_URL = "https://raw.githubusercontent.com/kjw26/wood-cutting-app-blob-main-app.py/main/BOM_DATA.xlsx"
 BOARD_PRESETS = {"4x8 (1220 x 2440)": (2440.0, 1220.0), "4x6 (1220 x 1830)": (1830.0, 1220.0)}
-MAX_PLAN_ROWS = 800
-MAX_EXPANDED_PARTS = 3000
-MAX_SHEETS_RENDER = 80
-st.set_page_config(page_title="목재 재단 프로그램 v27", layout="wide")
+MAX_PLAN_ROWS = 300
+MAX_EXPANDED_PARTS = 1500
+MAX_SHEETS_RENDER = 40
+st.set_page_config(page_title="목재 재단 프로그램 v29", layout="wide")
 
 def normalize_text(v):
     if v is None:
@@ -58,13 +60,17 @@ def parse_date_like(val):
             return ts
     return None
 
+@st.cache_data(show_spinner=False)
+def fetch_bom_url(url):
+    resp = requests.get(url, timeout=20)
+    resp.raise_for_status()
+    return resp.content
+
 def read_bom(uploaded_file, url_text):
     if uploaded_file is not None:
         return pd.read_excel(uploaded_file)
     url = normalize_text(url_text) or DEFAULT_BOM_URL
-    resp = requests.get(url, timeout=20)
-    resp.raise_for_status()
-    return pd.read_excel(io.BytesIO(resp.content))
+    return pd.read_excel(io.BytesIO(fetch_bom_url(url)))
 
 def is_cutting_target(row, w, h, t):
     material = normalize_text(row.get("재질")).upper()
@@ -82,32 +88,25 @@ def load_bom(df):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     df = df.fillna("")
-    items, errors = [], []
+    items = []
     for idx, row in df.iterrows():
         raw = row.to_dict()
         w, h, t = parse_spec(raw.get("규격"))
         bom_qty = to_int(raw.get("정소요량"), 0) or to_int(raw.get("실소요량"), 0)
-        item = {
+        items.append({
             "row_no": int(idx) + 2,
             "product_code": normalize_text(raw.get("품목코드")),
             "part_code": normalize_text(raw.get("부품코드")),
             "part_name": normalize_text(raw.get("품목명")),
             "color": normalize_text(raw.get("색상")),
             "bom_qty": max(1, bom_qty),
-            "qty": max(1, bom_qty),
             "spec_raw": normalize_text(raw.get("규격")),
             "width_mm": w,
             "height_mm": h,
             "thickness_mm": t,
             "is_cutting_target": is_cutting_target(raw, w, h, t),
-        }
-        items.append(item)
-        if not item["product_code"]:
-            errors.append({"row": item["row_no"], "field": "품목코드", "message": "누락"})
-        if not item["part_code"]:
-            errors.append({"row": item["row_no"], "field": "부품코드", "message": "누락"})
-    err_df = pd.DataFrame(errors) if errors else pd.DataFrame(columns=["row", "field", "message"])
-    return pd.DataFrame(items), err_df
+        })
+    return pd.DataFrame(items)
 
 def detect_text_column(raw, keywords, rows=25, cols=60):
     best, best_row = None, None
@@ -160,7 +159,7 @@ def find_header_layout(raw):
         color_col = min(product_col + 1, cols - 1)
     header_anchor = min(x for x in [product_row, color_row, date_row] if x is not None)
     data_start_row = detect_data_start_row(raw, product_col, date_cols, max(header_anchor + 1, date_row))
-    return {"product_col": product_col, "color_col": color_col, "date_cols": date_cols, "header_row": header_anchor, "date_row": date_row, "data_start_row": data_start_row}
+    return {"product_col": product_col, "color_col": color_col, "date_cols": date_cols, "data_start_row": data_start_row}
 
 def parse_plan_workbook_auto(file):
     xls = pd.ExcelFile(file)
@@ -204,34 +203,6 @@ def parse_plan_workbook_auto(file):
         plan_df = plan_df.groupby(["date", "product_code", "color"], as_index=False)["plan_qty"].sum().sort_values(["date", "product_code", "color"]).reset_index(drop=True)
     return plan_df, pd.DataFrame(logs)
 
-def read_scrap(uploaded_file):
-    if uploaded_file is None:
-        return pd.DataFrame(columns=["scrap_id", "color", "thickness_mm", "width_mm", "height_mm", "qty"])
-    df = pd.read_excel(uploaded_file).fillna("")
-    df.columns = [str(c).strip() for c in df.columns]
-    def find_col(*cands):
-        lowered = {c.lower(): c for c in df.columns}
-        for cand in cands:
-            if cand in df.columns:
-                return cand
-            if cand.lower() in lowered:
-                return lowered[cand.lower()]
-        return None
-    out = pd.DataFrame()
-    id_col = find_col("scrap_id", "자투리ID", "ID")
-    color_col = find_col("color", "색상")
-    thick_col = find_col("thickness_mm", "두께", "두께(mm)")
-    width_col = find_col("width_mm", "가로", "가로(mm)")
-    height_col = find_col("height_mm", "세로", "세로(mm)")
-    qty_col = find_col("qty", "수량")
-    out["scrap_id"] = df[id_col] if id_col else [f"S{i+1}" for i in range(len(df))]
-    out["color"] = df[color_col] if color_col else ""
-    out["thickness_mm"] = pd.to_numeric(df[thick_col], errors="coerce").fillna(0) if thick_col else 0
-    out["width_mm"] = pd.to_numeric(df[width_col], errors="coerce").fillna(0) if width_col else 0
-    out["height_mm"] = pd.to_numeric(df[height_col], errors="coerce").fillna(0) if height_col else 0
-    out["qty"] = pd.to_numeric(df[qty_col], errors="coerce").fillna(1).astype(int) if qty_col else 1
-    return out
-
 def aggregate_parts(parts_df, mix_same):
     if parts_df.empty:
         return pd.DataFrame(columns=["group_name", "part_code", "part_name", "product_code", "date", "color", "thickness_mm", "width_mm", "height_mm", "qty"])
@@ -248,9 +219,19 @@ def aggregate_parts(parts_df, mix_same):
 def expand_agg_parts(agg_df):
     expanded = []
     for _, p in agg_df.iterrows():
-        repeat = min(max(1, to_int(p["qty"], 1)), 50)
+        repeat = min(max(1, to_int(p["qty"], 1)), 60)
         for _ in range(repeat):
-            expanded.append({"group_name": p["group_name"], "part_code": p["part_code"], "part_name": p["part_name"], "product_code": p["product_code"], "date": p["date"], "color": p["color"], "thickness_mm": float(p["thickness_mm"]), "width_mm": float(p["width_mm"]), "height_mm": float(p["height_mm"])})
+            expanded.append({
+                "group_name": p["group_name"],
+                "part_code": p["part_code"],
+                "part_name": p["part_name"],
+                "product_code": p["product_code"],
+                "date": p["date"],
+                "color": p["color"],
+                "thickness_mm": float(p["thickness_mm"]),
+                "width_mm": float(p["width_mm"]),
+                "height_mm": float(p["height_mm"]),
+            })
     expanded.sort(key=lambda x: x["width_mm"] * x["height_mm"], reverse=True)
     return expanded[:MAX_EXPANDED_PARTS]
 
@@ -267,19 +248,30 @@ def try_place_in_rects(free_rects, part, rotate_allowed):
                     best = {"idx": idx, "w": w, "h": h, "score": score}
     return best
 
-def optimize_parts_fast(parts_df, scrap_df, board_width, board_height, kerf, margin, rotate_allowed, mix_same):
+def optimize_parts_fast(parts_df, board_width, board_height, kerf, margin, rotate_allowed, mix_same):
     usable_w, usable_h = board_width - margin * 2, board_height - margin * 2
     expanded = expand_agg_parts(aggregate_parts(parts_df, mix_same))
     sheets = []
-    leftovers = expanded.copy()
-    for part in leftovers:
+    for part in expanded:
         placed = False
         for sheet in sheets:
             best = try_place_in_rects(sheet["free_rects"], part, rotate_allowed)
             if best is None:
                 continue
             rect = sheet["free_rects"].pop(best["idx"])
-            sheet["placements"].append({"group_name": part["group_name"], "part_code": part["part_code"], "part_name": part["part_name"], "product_code": part["product_code"], "date": part["date"], "color": part["color"], "thickness_mm": part["thickness_mm"], "x_mm": round(rect["x"] + margin, 1), "y_mm": round(rect["y"] + margin, 1), "width_mm": round(best["w"], 1), "height_mm": round(best["h"], 1)})
+            sheet["placements"].append({
+                "group_name": part["group_name"],
+                "part_code": part["part_code"],
+                "part_name": part["part_name"],
+                "product_code": part["product_code"],
+                "date": part["date"],
+                "color": part["color"],
+                "thickness_mm": part["thickness_mm"],
+                "x_mm": round(rect["x"] + margin, 1),
+                "y_mm": round(rect["y"] + margin, 1),
+                "width_mm": round(best["w"], 1),
+                "height_mm": round(best["h"], 1),
+            })
             rw, bh = rect["w"] - best["w"] - kerf, rect["h"] - best["h"] - kerf
             if rw > 0:
                 sheet["free_rects"].append({"x": rect["x"] + best["w"] + kerf, "y": rect["y"], "w": rw, "h": best["h"]})
@@ -293,7 +285,19 @@ def optimize_parts_fast(parts_df, scrap_df, board_width, board_height, kerf, mar
             sheet = {"sheet_no": len(sheets) + 1, "placements": [], "free_rects": [{"x": 0.0, "y": 0.0, "w": usable_w, "h": usable_h}]}
             sheets.append(sheet)
             rect = sheet["free_rects"].pop(0)
-            sheet["placements"].append({"group_name": part["group_name"], "part_code": part["part_code"], "part_name": part["part_name"], "product_code": part["product_code"], "date": part["date"], "color": part["color"], "thickness_mm": part["thickness_mm"], "x_mm": round(rect["x"] + margin, 1), "y_mm": round(rect["y"] + margin, 1), "width_mm": round(part["width_mm"], 1), "height_mm": round(part["height_mm"], 1)})
+            sheet["placements"].append({
+                "group_name": part["group_name"],
+                "part_code": part["part_code"],
+                "part_name": part["part_name"],
+                "product_code": part["product_code"],
+                "date": part["date"],
+                "color": part["color"],
+                "thickness_mm": part["thickness_mm"],
+                "x_mm": round(rect["x"] + margin, 1),
+                "y_mm": round(rect["y"] + margin, 1),
+                "width_mm": round(part["width_mm"], 1),
+                "height_mm": round(part["height_mm"], 1),
+            })
             rw, bh = rect["w"] - part["width_mm"] - kerf, rect["h"] - part["height_mm"] - kerf
             if rw > 0:
                 sheet["free_rects"].append({"x": rect["x"] + part["width_mm"] + kerf, "y": rect["y"], "w": rw, "h": part["height_mm"]})
@@ -303,7 +307,7 @@ def optimize_parts_fast(parts_df, scrap_df, board_width, board_height, kerf, mar
     board_area = board_width * board_height
     used = len(sheets)
     yield_rate = round((total_area / (used * board_area)) * 100, 2) if used else 0.0
-    return {"board_width_mm": board_width, "board_height_mm": board_height, "used_boards": used, "yield_rate": yield_rate, "waste_area": max(0.0, used * board_area - total_area), "sheets": sheets, "scrap_used": []}
+    return {"board_width_mm": board_width, "board_height_mm": board_height, "used_boards": used, "yield_rate": yield_rate, "sheets": sheets}
 
 def exact_signature(sheet):
     sig = []
@@ -323,14 +327,6 @@ def compress_sheets_exact(sheets):
         out.append({"sheet_no": i, "placements": g["sheet"]["placements"], "count": g["count"], "all_placements": g["all_placements"]})
     return out
 
-def scenario_table(parts_df, kerf, margin, rotate_allowed, mix_same):
-    scenarios = [("현재 조건", 2440.0, 1220.0, margin), ("4x8 / 여유치 5", 2440.0, 1220.0, 5.0), ("4x8 / 여유치 10", 2440.0, 1220.0, 10.0), ("4x6 / 여유치 10", 1830.0, 1220.0, 10.0)]
-    rows = []
-    for name, bw, bh, mg in scenarios:
-        r = optimize_parts_fast(parts_df, None, bw, bh, kerf, mg, rotate_allowed, mix_same)
-        rows.append({"시나리오": name, "원장 가로": bw, "원장 세로": bh, "여유치": mg, "사용 원장 수": r["used_boards"], "수율(%)": r["yield_rate"]})
-    return pd.DataFrame(rows)
-
 def make_svg(sheet, board_width_mm, board_height_mm):
     scale = min(900 / board_width_mm, 600 / board_height_mm)
     svg_width, svg_height = int(board_width_mm * scale), int(board_height_mm * scale)
@@ -342,8 +338,7 @@ def make_svg(sheet, board_width_mm, board_height_mm):
         t2 = f"{p['part_name'][:16]} / {p['color']} / {p['date'][5:]}"
         t3 = f"{p['width_mm']}x{p['height_mm']} / t{p['thickness_mm']}"
         parts_svg.append(f'<g><rect x="{x}" y="{y}" width="{w}" height="{h}" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.2"></rect><text x="{x+4}" y="{y+16}" font-size="11" fill="#111">{t1}</text><text x="{x+4}" y="{y+30}" font-size="11" fill="#111">{t2}</text><text x="{x+4}" y="{y+44}" font-size="11" fill="#111">{t3}</text></g>')
-    badge = f'<text x="10" y="20" font-size="16" fill="#b91c1c">정밀형 동일 분할도 x{sheet.get("count",1)}장</text>' if sheet.get("count",1) > 1 else ""
-    return f'<div style="overflow:auto; border:1px solid #ddd; padding:12px; background:#fff;"><svg width="{svg_width}" height="{svg_height}" xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="{svg_width}" height="{svg_height}" fill="white" stroke="#333" stroke-width="2"></rect>{badge}{"".join(parts_svg)}</svg></div>'
+    return f'<div style="overflow:auto; border:1px solid #ddd; padding:12px; background:#fff;"><svg width="{svg_width}" height="{svg_height}" xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="{svg_width}" height="{svg_height}" fill="white" stroke="#333" stroke-width="2"></rect>{"".join(parts_svg)}</svg></div>'
 
 def build_pattern_workorder(sheet):
     df = pd.DataFrame(sheet["all_placements"] if "all_placements" in sheet else sheet["placements"])
@@ -363,82 +358,95 @@ def export_pattern_workorders_excel(compressed_sheets):
     output.seek(0)
     return output.getvalue()
 
-def build_workorder_excel(summary_df, placement_df, scenario_df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, sheet_name="작업지시요약", index=False)
-        if placement_df is not None and not placement_df.empty:
-            placement_df.to_excel(writer, sheet_name="분할목록", index=False)
-        if scenario_df is not None and not scenario_df.empty:
-            scenario_df.to_excel(writer, sheet_name="시나리오분석", index=False)
-    output.seek(0)
-    return output.getvalue()
+st.title("목재 재단 프로그램 v29")
+st.caption("누락 부품 확인용 개선 버전")
+
+bom_url = st.text_input("BOM URL (기본 고정)", value=DEFAULT_BOM_URL)
+bom_file = st.file_uploader("또는 BOM 엑셀 업로드", type=["xlsx", "xls"], key="bom")
+plan_file = st.file_uploader("주차별 생산계획 업로드", type=["xlsx", "xls"], key="plan")
 
 try:
-    st.title("목재 재단 프로그램 v27")
-    st.caption("정밀형 분류 + 두께 표시 + 패턴별 작업지시서")
-    st.subheader("입력")
-    bom_url = st.text_input("BOM URL (기본 고정)", value=DEFAULT_BOM_URL)
-    bom_file = st.file_uploader("또는 BOM 엑셀 업로드", type=["xlsx", "xls"], key="bom")
-    plan_file = st.file_uploader("주차별 생산계획 업로드", type=["xlsx", "xls"], key="plan")
     bom_df = None
     if bom_file is not None or normalize_text(bom_url):
-        raw_bom = read_bom(bom_file, bom_url)
-        bom_df, _ = load_bom(raw_bom)
+        bom_df = load_bom(read_bom(bom_file, bom_url))
         st.success(f"BOM 로드 완료: {len(bom_df)}행")
+
     if bom_df is not None and plan_file is not None:
         plan_df, parse_log_df = parse_plan_workbook_auto(plan_file)
-        with st.expander("생산계획 해석 로그", expanded=True):
-            st.dataframe(parse_log_df, width="stretch", height=220)
-        if not plan_df.empty:
+        with st.expander("생산계획 해석 로그", expanded=False):
+            st.dataframe(parse_log_df, width="stretch", height=180)
+
+        if plan_df.empty:
+            st.warning("주차별 생산계획을 자동 해석하지 못했습니다.")
+        else:
+            if len(plan_df) > MAX_PLAN_ROWS:
+                st.warning(f"생산계획이 커서 상위 {MAX_PLAN_ROWS}건만 처리합니다.")
+                plan_df = plan_df.head(MAX_PLAN_ROWS)
+
             c1, c2, c3, c4 = st.columns(4)
             board_preset = c1.selectbox("원장 규격", list(BOARD_PRESETS.keys()), index=0)
             kerf = c2.number_input("톱날폭(mm)", min_value=0.0, value=4.8, step=0.1, format="%.1f")
             margin = c3.number_input("여유치(mm)", min_value=0.0, value=10.0, step=0.1, format="%.1f")
             rotate_allowed = c4.checkbox("회전 허용", value=True)
             mix_same = st.checkbox("같은 색상 + 같은 두께 혼합 재단", value=True)
-            integrate_all_dates = st.checkbox("모든 날짜 통합 혼합 재단", value=True)
+
+            selected_date = st.selectbox("작업 날짜 선택", sorted(plan_df["date"].unique().tolist()))
+            selected_product = st.selectbox("품목코드 선택", sorted(plan_df["product_code"].unique().tolist()))
+
+            work_plan = plan_df[(plan_df["date"] == selected_date) & (plan_df["product_code"] == selected_product)].copy()
             bw, bh = BOARD_PRESETS[board_preset]
-            work_plan = plan_df.copy() if integrate_all_dates else plan_df[plan_df["date"] == st.selectbox("작업 날짜 선택", sorted(plan_df["date"].unique().tolist()))].copy()
-            parts_rows = []
-            for _, row in work_plan.iterrows():
+
+            if work_plan.empty:
+                st.warning("선택한 날짜/품목코드의 생산계획이 없습니다.")
+            else:
+                row = work_plan.iloc[0]
                 product_code = normalize_text(row["product_code"])
                 color = normalize_text(row["color"])
                 plan_qty = to_int(row["plan_qty"], 0)
-                date_val = normalize_text(row["date"])
-                matched = bom_df[(bom_df["product_code"] == product_code) & (bom_df["is_cutting_target"] == True)].copy()
-                if color:
-                    matched_color = matched[matched["color"] == color].copy()
-                    if not matched_color.empty:
-                        matched = matched_color
-                if matched.empty:
-                    continue
-                matched["qty"] = matched["bom_qty"].astype(int) * plan_qty
-                matched["date"] = date_val
-                parts_rows.append(matched)
-            if parts_rows:
-                parts_df = pd.concat(parts_rows, ignore_index=True)
-                result = optimize_parts_fast(parts_df, None, bw, bh, float(kerf), float(margin), rotate_allowed, mix_same)
-                scenario_df = scenario_table(parts_df, float(kerf), float(margin), rotate_allowed, mix_same)
-                compressed_sheets = compress_sheets_exact(result["sheets"])
-                summary_df = (parts_df.groupby(["color", "thickness_mm"], dropna=False)
-                              .agg(총_재단_수량=("qty", "sum"), 품목수=("part_code", "count"), 날짜수=("date", "nunique"))
-                              .reset_index()
-                              .rename(columns={"color": "색상", "thickness_mm": "두께(mm)", "총_재단_수량": "총 재단 수량"}))
-                placement_rows = []
-                for s in compressed_sheets:
-                    for p in s["all_placements"]:
-                        placement_rows.append({"sheet_no": s["sheet_no"], "정밀동일분할도수": s.get("count", 1), "date": p["date"], "product_code": p["product_code"], "part_code": p["part_code"], "part_name": p["part_name"], "color": p["color"], "thickness_mm": p["thickness_mm"], "x_mm": p["x_mm"], "y_mm": p["y_mm"], "width_mm": p["width_mm"], "height_mm": p["height_mm"]})
-                placement_df = pd.DataFrame(placement_rows)
 
-                st.download_button("작업지시서 엑셀 다운로드", data=build_workorder_excel(summary_df, placement_df, scenario_df), file_name="wood_cutting_workorder_v27.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
-                st.download_button("패턴별 작업지시서 다운로드", data=export_pattern_workorders_excel(compressed_sheets), file_name="pattern_workorders_v27.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+                matched_all = bom_df[bom_df["product_code"] == product_code].copy()
+                matched_color = matched_all[matched_all["color"] == color].copy() if color else matched_all.copy()
+                matched_used = matched_color if not matched_color.empty else matched_all.copy()
 
-                st.markdown("### 패턴별 작업지시서")
-                for s in compressed_sheets:
-                    st.markdown(f"#### Sheet {s['sheet_no']} (x{s.get('count',1)})")
-                    st.dataframe(build_pattern_workorder(s), width="stretch", height=220)
-                    components.html(make_svg(s, result["board_width_mm"], result["board_height_mm"]), height=520, scrolling=True)
+                st.markdown("### BOM 전체 매칭 결과")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("BOM 전체 부품 수", len(matched_all))
+                c2.metric("색상 일치 부품 수", len(matched_color))
+                c3.metric("재단 대상 부품 수", len(matched_used[matched_used["is_cutting_target"] == True]))
+
+                with st.expander("해당 품목코드의 BOM 전체 보기", expanded=True):
+                    st.dataframe(matched_all, width="stretch", height=260)
+
+                with st.expander("재단 제외 부품 보기", expanded=False):
+                    st.dataframe(matched_used[matched_used["is_cutting_target"] != True], width="stretch", height=220)
+
+                parts_df = matched_used[matched_used["is_cutting_target"] == True].copy()
+                parts_df["qty"] = parts_df["bom_qty"].astype(int) * plan_qty
+                parts_df["date"] = selected_date
+
+                if parts_df.empty:
+                    st.warning("재단 대상 부품이 없습니다.")
+                else:
+                    st.markdown("### 실제 패턴 계산에 들어간 부품")
+                    st.dataframe(parts_df, width="stretch", height=260)
+
+                    result = optimize_parts_fast(parts_df, bw, bh, float(kerf), float(margin), rotate_allowed, mix_same)
+                    compressed_sheets = compress_sheets_exact(result["sheets"])
+
+                    c1, c2 = st.columns(2)
+                    c1.metric("사용 원장 수", result["used_boards"])
+                    c2.metric("수율", f"{result['yield_rate']}%")
+
+                    st.download_button("패턴별 작업지시서 다운로드", data=export_pattern_workorders_excel(compressed_sheets), file_name="pattern_workorders_v29.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+
+                    labels = [f"Sheet {s['sheet_no']} (x{s.get('count',1)})" for s in compressed_sheets]
+                    if labels:
+                        selected_sheet_label = st.selectbox("시트 선택", labels)
+                        selected_sheet_no = int(selected_sheet_label.split("(")[0].replace("Sheet", "").strip())
+                        selected_sheet = next(s for s in compressed_sheets if s["sheet_no"] == selected_sheet_no)
+                        st.markdown("### 패턴별 작업지시서")
+                        st.dataframe(build_pattern_workorder(selected_sheet), width="stretch", height=220)
+                        components.html(make_svg(selected_sheet, result["board_width_mm"], result["board_height_mm"]), height=520, scrolling=True)
 except Exception as e:
     st.error(f"앱 실행 오류: {type(e).__name__}: {e}")
     with st.expander("오류 상세", expanded=True):
